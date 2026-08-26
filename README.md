@@ -170,10 +170,19 @@ Patterns found through actual testing, not assumed -- added to as more come up.
      single snapshot -- if it describes only the pre-music ambience with
      no acknowledgment that music enters partway through, that silently
      contradicts `non_diegetic_music`'s claim that something changes.
-     State the shift in *both* fields, consistently, e.g.
-     `overall_soundscape: ambient city noise throughout, with music
-     entering at 4 seconds` alongside `non_diegetic_music: music starts
-     playing at 00:04`.
+     Anchor *both* the start and the transition explicitly, consistently
+     across both fields. Confirmed working exactly as intended:
+
+     ```text
+     integrated_multimodal_description: [Shot 1] Static shot of a castle
+     exterior. At second 4, the camera continuously in one shot whips 180
+     degrees in one continuous motion, revealing a city skyline.
+
+     overall_soundscape: at 00.00 ambient city noises can be heard in the
+     background then at 4 seconds music starts playing
+
+     non_diegetic_music: music starts playing at 4 seconds
+     ```
 
 ## Requirements
 
