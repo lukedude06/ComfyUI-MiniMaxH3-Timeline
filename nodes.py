@@ -248,6 +248,23 @@ class MiniMaxH3TimelineBundle:
     pretimeline_gap_seconds: float = 1.0
     spatial_collision_offset: float = 64.0
     anchor_decouple_scale_seconds: float = 2.0
+    # Native MiniMax H3 parameters, real and exposed (see INPUT_TYPES) --
+    # unlike the fields above, these are a single GLOBAL scalar applied
+    # uniformly to every keyframe/reference row at once (comfy/ldm/minimax/
+    # model.py's _cond_video_rows/_cond_audio_rows read one payload value for
+    # the whole generation, not per-row), so there's no meaningful per-item
+    # version to expose -- this genuinely is a global setting, not a
+    # simplification like pretimeline_gap was. Controls both how much noise
+    # gets mixed into each conditioning row (r = aug*r + (1-aug)*noise) and
+    # what "denoising timestep" that row appears to be at to the network
+    # (max(current_timestep, aug)) -- at the native default 0.999, a keyframe
+    # is treated as essentially already-resolved content from the very first
+    # sampling step, which is why a mid-clip keyframe can produce a hard cut
+    # instead of a gradual transition into it: the model isn't given room to
+    # build up to it. Lowering this loosens that at the cost of the keyframe/
+    # reference being reproduced less exactly.
+    visual_cond_noise_aug: float = 0.999
+    audio_cond_noise_aug: float = 1.0
 
 
 class MiniMaxH3TimelineEditor:
@@ -275,6 +292,17 @@ class MiniMaxH3TimelineEditor:
         return {
             "required": {
                 "duration_seconds": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 15.0, "step": 0.1}),
+                # How rigidly EVERY keyframe/reference row is enforced, all at
+                # once (native MiniMax H3 parameter, applied globally -- see
+                # MiniMaxH3TimelineBundle's docstring comment for the full
+                # mechanism). 0.999 is the native default: rows are treated as
+                # already-resolved from the first sampling step, which can
+                # cause a hard cut into a mid-clip keyframe instead of a
+                # gradual transition. Lower to loosen that, at the cost of
+                # less exact reproduction of keyframe/reference content.
+                "visual_cond_noise_aug": ("FLOAT", {"default": 0.999, "min": 0.0, "max": 1.0, "step": 0.001}),
+                # Same mechanism, for reference AUDIO rows specifically.
+                "audio_cond_noise_aug": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 # {filename, type, role, anchor_seconds}[] -- populated by the
                 # frontend's upload cards, not meant to be hand-edited. See
                 # MAX_MEDIA for the (non-architectural) item cap.
@@ -286,7 +314,7 @@ class MiniMaxH3TimelineEditor:
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
 
-    def build_timeline(self, duration_seconds, media_json="[]"):
+    def build_timeline(self, duration_seconds, visual_cond_noise_aug=0.999, audio_cond_noise_aug=1.0, media_json="[]"):
         try:
             raw_items = json.loads(media_json or "[]")
         except (TypeError, ValueError):
@@ -322,7 +350,11 @@ class MiniMaxH3TimelineEditor:
         keyframe_ends = [i for i in items if i.role == KEYFRAME_END]
         if len(keyframe_starts) > 1 or len(keyframe_ends) > 1:
             raise ValueError("MiniMax H3 Timeline Editor accepts at most one keyframe_start and one keyframe_end item")
-        return (MiniMaxH3TimelineBundle(tuple(items), float(duration_seconds)),)
+        return (MiniMaxH3TimelineBundle(
+            tuple(items), float(duration_seconds),
+            visual_cond_noise_aug=float(visual_cond_noise_aug),
+            audio_cond_noise_aug=float(audio_cond_noise_aug),
+        ),)
 
 
 def _frame_index_to_token_index(pixel_frame_index):
@@ -813,6 +845,15 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
         })
     if ref_blocks:
         conditioning = node_helpers.conditioning_set_values(conditioning, {"minimax_refs": ref_blocks})
+    if keyframes or ref_blocks:
+        # Native MiniMax H3 parameters -- see MiniMaxH3TimelineBundle's
+        # docstring comment. _make_fixed_extra_conds already forwards these
+        # from kwargs into the payload if present; this is what actually
+        # supplies them, which nothing did before.
+        conditioning = node_helpers.conditioning_set_values(conditioning, {
+            "minimax_visual_cond_noise_aug": timeline.visual_cond_noise_aug,
+            "minimax_audio_cond_noise_aug": timeline.audio_cond_noise_aug,
+        })
     return conditioning, latent
 
 
