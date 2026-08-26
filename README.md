@@ -134,6 +134,13 @@ Patterns found through actual testing, not assumed -- added to as more come up.
   represented -- it can't create temporal room that isn't there. Increasing
   `duration_seconds` fixed a hard cut that no `noise_aug` value did.
 
+- One-off observation, not verified across cases: lowering a *reference*
+  item's `noise_aug` to around `0.8` was noticed to reduce clipping on
+  something the reference character was holding (a sword), which looked
+  worse/less clear at the `0.999` default. Could be worth experimenting
+  with if you're seeing similar issues with a character's held items or
+  movement -- not claiming this generalizes.
+
 ## Requirements
 
 - ComfyUI with MiniMax H3 support (`comfy_extras/nodes_minimax_h3.py`).
