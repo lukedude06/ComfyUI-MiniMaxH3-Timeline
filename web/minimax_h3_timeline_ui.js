@@ -40,7 +40,7 @@ function installStyles() {
     const style = document.createElement("style");
     style.textContent = `
 .h3c-root{box-sizing:border-box;width:100%;font:11px system-ui,sans-serif;color:#ddd;display:flex;flex-direction:column;gap:6px}
-.h3c-row{display:flex;flex-direction:row;gap:8px;flex-wrap:wrap}
+.h3c-row{display:flex;flex-direction:row;gap:8px;flex-wrap:nowrap}
 .h3c-card{flex:0 0 160px;display:flex;flex-direction:column;gap:4px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px;position:relative}
 .h3c-drop{height:90px;border:1.5px dashed #587084;border-radius:5px;display:flex;align-items:center;justify-content:center;text-align:center;color:#8fa3b2;cursor:pointer;overflow:hidden;background:#0d1217}
 .h3c-drop.over{background:#1b2933;border-color:#8dd7ff}
@@ -51,7 +51,8 @@ function installStyles() {
 .h3c-modebar button.active{background:rgba(120,170,255,0.35);border-color:#7aaeff}
 .h3c-sub{display:flex;flex-direction:column;gap:3px}
 .h3c-seconds{display:flex;align-items:center;gap:4px;font-size:10px;color:#ccc}
-.h3c-seconds input{width:44px;background:#111a21;color:#ddd;border:1px solid #40515e;border-radius:3px;padding:1px 3px}
+.h3c-seconds input{width:52px;background:#111a21;color:#ddd;border:1px solid #40515e;border-radius:3px;padding:1px 3px;-moz-appearance:textfield}
+.h3c-seconds input::-webkit-outer-spin-button,.h3c-seconds input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .h3c-add{flex:0 0 90px;display:flex;align-items:center;justify-content:center;border:1.5px dashed #7edca0;border-radius:6px;color:#bff3d0;cursor:pointer;font-size:24px;font-weight:700;background:rgba(126,235,167,0.06)}
 .h3c-add:hover{background:rgba(126,235,167,0.16)}
 .h3c-hint{font-size:10px;color:#888}
