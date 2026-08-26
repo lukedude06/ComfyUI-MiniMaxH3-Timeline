@@ -43,11 +43,13 @@ new segment kind for audio pinned to a specific point in the target's own
 audio track -- both genuinely new, verified working through real generation
 tests, not just assumed to work because the position math is consistent.
 
-**`noise_aug` is one global scalar in native code, applied identically to
-every keyframe/reference row for the whole generation** -- there's no way
-to trust one item more than another. This project patches the row-content
-and row-timestep pipelines so each item's own value actually drives its own
-row, independently, verified directly (not just parsed and ignored).
+Native code reads `noise_aug` as one global scalar for the whole
+generation, applied identically to every keyframe/reference row -- **native
+code alone gives you no way to trust one item more than another.** This
+project's per-item `noise_aug` field (on every card) fixes exactly that: it
+patches the row-content and row-timestep pipelines so each item's own value
+genuinely drives its own row, independently -- verified directly, not just
+parsed and ignored.
 
 **Multiple simultaneous reference characters work correctly out of the box**
 once the two bugs above are fixed. An earlier iteration of this project
