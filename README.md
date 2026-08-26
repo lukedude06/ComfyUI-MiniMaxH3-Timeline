@@ -44,10 +44,20 @@ Upload media directly as cards (the same `/upload/image` endpoint native
 `LoadImage` uses) rather than wiring in separate loader nodes -- click a card
 to upload an image, video, or audio file, then mark its role:
 
-- **Start** / **End** -- pins that image to the clip's first/last frame.
+- **Start** / **End** -- pins that media to the clip's first/last frame (or,
+  for audio, the first/last point of the target's own audio track).
 - **Mid** -- a keyframe placed at any point in the clip (`at:` seconds, not
   restricted to the two endpoints).
 - **Ref** -- a reference for identity/character conditioning.
+
+Start/End/Mid accept **image, video, or audio**. A video keyframe pins a
+short clip (not just a single frame) starting at that point -- genuinely
+useful for stitching separate pieces of footage together into one
+generation, either as a hard cut or a smooth transition depending on
+prompt/duration. An audio keyframe pins specific audio content (e.g. a
+music track) to start at that exact point in the target's own audio;
+verified accurate to the second. `Ref` only accepts image/video/audio for
+identity/character conditioning, not keyframing.
 
 Every card also has a **`noise_aug`** field (default 0.999, 1.0 = used
 exactly as given). This is a real native MiniMax H3 mechanism made of two
@@ -140,6 +150,30 @@ Patterns found through actual testing, not assumed -- added to as more come up.
   worse/less clear at the `0.999` default. Could be worth experimenting
   with if you're seeing similar issues with a character's held items or
   movement -- not claiming this generalizes.
+
+- **Music/audio appearing before it's supposed to (e.g. with an audio
+  keyframe pinning a track to start partway through) is a prompt problem,
+  not an audio-keyframe bug.** Confirmed the hard way: the same behavior
+  happens with no audio keyframe at all, and persists even when the
+  keyframe's content is made architecturally impossible to influence
+  anything before its own anchor point -- so the model is generating this
+  from the prompt/its own tendencies, not from the keyframe. Two things
+  actually fixed it, using MiniMax H3's structured prompt fields
+  (`integrated_multimodal_description` / `overall_soundscape` /
+  `non_diegetic_music` -- see the model's own prompt guide for the full
+  schema):
+  1. State timing **positively**, never as a negation or `N/A`. "No music
+     for the first four seconds" reliably failed; "music starts playing at
+     00:04" reliably worked. Negation puts the word "music" in the prompt
+     regardless of what's negating it.
+  2. `overall_soundscape` covers the **entire clip's duration**, not a
+     single snapshot -- if it describes only the pre-music ambience with
+     no acknowledgment that music enters partway through, that silently
+     contradicts `non_diegetic_music`'s claim that something changes.
+     State the shift in *both* fields, consistently, e.g.
+     `overall_soundscape: ambient city noise throughout, with music
+     entering at 4 seconds` alongside `non_diegetic_music: music starts
+     playing at 00:04`.
 
 ## Requirements
 
