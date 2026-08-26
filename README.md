@@ -230,7 +230,7 @@ No extra Python dependencies beyond what ComfyUI itself already ships with.
 
 ## How this was built
 
-Most of the code here was written by Claude (Anthropic), via Claude Code,
+Most of the code here was written by Claude, via Claude Code,
 working with the repo owner over a sustained, multi-session process -- not
 a single generation. That process included reading the installed MiniMax
 H3 / ComfyUI source directly to find the two native bugs this project
