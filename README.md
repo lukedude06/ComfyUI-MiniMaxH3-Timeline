@@ -141,10 +141,15 @@ that's where the two bug fixes above actually get applied. Wiring
 `Load Diffusion Model`'s output around this node instead silently
 reintroduces both bugs, with no error.
 
-Typing `@` in the prompt shows the timeline's actual reference items and
+Typing `@` in the prompt shows the timeline's actual **reference** items and
 their real `<Picture N>` / `<Video N>` / `<Audio N>` tags, computed the same
 way the backend resolves them at generation time -- no guessing which tag
-maps to which uploaded item.
+maps to which uploaded item. This is `Ref`-only, deliberately -- keyframes
+have no tag mechanism to surface at all: a reference is a detached block
+that needs a textual anchor telling the model which one to use where, but a
+keyframe is already pinned to an exact position in the sequence, so there's
+nothing to tag. You describe what happens at a keyframe in plain prose
+(inside its `[Shot N]`), not by naming it.
 
 ## Tips
 
