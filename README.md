@@ -184,6 +184,18 @@ Patterns found through actual testing, not assumed -- added to as more come up.
      non_diegetic_music: music starts playing at 4 seconds
      ```
 
+## Installation
+
+Clone (or copy) this repo into your ComfyUI `custom_nodes` directory:
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/lukedude06/ComfyUI-MiniMaxH3-Easy.git
+```
+
+Restart ComfyUI. `MiniMax H3 Timeline Editor` and `MiniMax H3 Conditioning
+(Timeline Integration)` will appear in the node search.
+
 ## Requirements
 
 - ComfyUI with MiniMax H3 support (`comfy_extras/nodes_minimax_h3.py`).
@@ -192,6 +204,12 @@ Patterns found through actual testing, not assumed -- added to as more come up.
   ComfyUI's native `Load Diffusion Model` / `Load CLIP` / `Load VAE` nodes.
 
 No extra Python dependencies beyond what ComfyUI itself already ships with.
+
+## AI disclosure
+
+See [AI_DISCLOSURE.md](AI_DISCLOSURE.md) -- most of this code was written
+by Claude (Anthropic) via Claude Code, directed by the repo owner over a
+sustained testing process, not a single generation.
 
 ## License
 
