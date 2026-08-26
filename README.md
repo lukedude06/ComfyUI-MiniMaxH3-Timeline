@@ -65,6 +65,17 @@ Outputs `model`, `positive` (conditioning), `latent`, `video_vae`,
 `VAEDecode` / `VAEDecodeAudio` / `CreateVideo` chain like any other ComfyUI
 video workflow.
 
+**Use the `model` output of this node, not the `Load Diffusion Model` node
+directly, downstream (LoRA, attention patches, sampling, etc.).** They are
+not the same object when a keyframe and a reference are combined or a
+mid-clip keyframe is used: this node clones the model and attaches the
+corrected `extra_conds` here -- that's where the two bug fixes above
+actually get applied. Wiring the original loader's `MODEL` output around
+this node instead silently reintroduces both bugs, with no error. `video_vae`
+and `audio_vae` are plain passthroughs, unlike `model` -- wiring `Load VAE`
+directly to `VAEDecode`/`VAEDecodeAudio` instead works identically and is
+fine to do.
+
 Typing `@` in the prompt shows the timeline's actual reference items and
 their real `<Picture N>` / `<Video N>` / `<Audio N>` tags, computed the same
 way the backend resolves them at generation time -- no guessing which tag
