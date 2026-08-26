@@ -11,6 +11,8 @@ Timeline Editor` and `MiniMax H3 Conditioning (Timeline Integration)`.
 
 ![Example workflow graph](workflow/example_workflow.png)
 
+Here is the workflow shown in the image: [`workflow/MiniMaxH3_Timeline_Template.json`](workflow/MiniMaxH3_Timeline_Template.json)
+
 ## Why this exists
 
 Several real gaps in native ComfyUI's MiniMax H3 support, each confirmed
