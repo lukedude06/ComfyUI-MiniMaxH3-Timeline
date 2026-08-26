@@ -155,6 +155,16 @@ nothing to tag. You describe what happens at a keyframe in plain prose
 
 Patterns found through actual testing, not assumed -- added to as more come up.
 
+- **Wire the Conditioning node's `fps` output into `CreateVideo`'s `fps`
+  input, or the video plays back at the wrong speed with no error at all.**
+  If left unwired, `CreateVideo` falls back to whatever its own `fps`
+  widget is set to (its default, or whatever you last typed) instead of the
+  rate the clip was actually generated at. Confirmed directly: a 7-second
+  request played back as 5.83 seconds with this unwired -- 175 frames
+  divided by the widget's 30fps instead of the actual 24fps the frames were
+  generated at. See the example workflow below for what the correct wiring
+  looks like.
+
 - **This works well with the fl2va-only, ref2va-only, and combined
   fl2va_ref2va_adaln_blend checkpoints alike** -- comparing the same
   timeline/prompt across all three showed no meaningful output difference.
@@ -223,6 +233,20 @@ git clone https://github.com/lukedude06/ComfyUI-MiniMaxH3-Easy.git
 
 Restart ComfyUI. `MiniMax H3 Timeline Editor` and `MiniMax H3 Conditioning
 (Timeline Integration)` will appear in the node search.
+
+## Example workflow
+
+![Example workflow graph](workflow/example_workflow.png)
+
+[`workflow/MiniMaxH3_Timeline_Template.json`](workflow/MiniMaxH3_Timeline_Template.json)
+is a real, correctly-wired workflow -- drag it into ComfyUI to load it
+directly. It demonstrates a combined generation: a video keyframe pinning
+the clip's start, a second video keyframe mid-clip, and an audio keyframe
+pinning a music track partway through, all through the `ref2va` checkpoint.
+Notably it has the `fps` output wired from the Conditioning node into
+`CreateVideo`'s `fps` input -- the exact wiring gotcha documented in Tips
+above, done correctly here so it's obvious what "correct" looks like rather
+than only described in prose.
 
 ## Requirements
 
