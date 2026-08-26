@@ -1,15 +1,21 @@
 # ComfyUI-MiniMaxH3-Easy
 
-Combined keyframe + reference conditioning for MiniMax H3 in ComfyUI: one
-timeline where each item is either a keyframe (start / end / mid-clip frame)
-or a reference (identity/character conditioning), generated together in a
-single pass. Two nodes: `MiniMax H3 Timeline Editor` and `MiniMax H3
-Conditioning (Timeline Integration)`.
+A timeline-based editor for MiniMax H3 in ComfyUI that goes past what
+either native mode (fl2va keyframes, ref2va references) supports alone:
+keyframes and references combined in one generation, video keyframes that
+stitch separate clips together, audio keyframes that pin a track to start
+at an exact second, and genuine per-item control over how strongly each
+piece of media is trusted -- none of which native code has a path for, not
+just a bug-fix wrapper around what already existed. Two nodes: `MiniMax H3
+Timeline Editor` and `MiniMax H3 Conditioning (Timeline Integration)`.
 
 ## Why this exists
 
-Native ComfyUI has two real bugs that prevent keyframes and references from
-being combined in one MiniMax H3 generation:
+Several real gaps in native ComfyUI's MiniMax H3 support, each confirmed
+directly against the installed source (not assumed from community
+explanations), each with no existing fix or code path to build on:
+
+**Two real bugs blocked combining keyframes and references at all:**
 
 1. `comfy/model_base.py`'s `MiniMaxH3.extra_conds` builds the conditioning
    video-latent list from keyframes, then unconditionally **overwrites** it
@@ -21,20 +27,35 @@ being combined in one MiniMax H3 generation:
    real start later in the sequence, so with references present the
    keyframe ends up anchored to a point *before* the video actually begins.
 
-Both were confirmed directly against the installed ComfyUI source, not
-assumed from community explanations. This project patches the loaded
-model's `extra_conds` (via `model.clone().add_object_patch(...)`, the
-standard non-invasive override mechanism -- no core files are edited) with a
-corrected version that concatenates both latent lists and anchors keyframes
-against the real, post-reference video origin.
+Both get fixed by patching the loaded model's `extra_conds` (via
+`model.clone().add_object_patch(...)`, the standard non-invasive override
+mechanism -- no core files are edited) with a corrected version that
+concatenates both latent lists and anchors keyframes against the real,
+post-reference video origin.
 
-Multiple simultaneous reference characters work correctly out of the box.
-An earlier iteration of this project added a whole per-reference
-position/strength ("anchoring") system to try to force multiple references
-into one shared scene; extensive same-seed A/B testing showed that plain,
-unanchored multi-reference conditioning already produces clean co-presence
-once the two bugs above are fixed, so that system was removed rather than
-kept as an unused, confusing knob.
+**Video and audio keyframes don't exist anywhere in native code at all** --
+not a bug, a missing capability. Native `PackedLayout` only ever builds a
+single-frame keyframe segment, and native audio conditioning (`ref_audio`)
+is never positioned inside the target's own timeline, only in a pretimeline
+reference slot. This project extends the keyframe segment to support
+multiple frames (a real video clip, not just a still) and adds an entirely
+new segment kind for audio pinned to a specific point in the target's own
+audio track -- both genuinely new, verified working through real generation
+tests, not just assumed to work because the position math is consistent.
+
+**`noise_aug` is one global scalar in native code, applied identically to
+every keyframe/reference row for the whole generation** -- there's no way
+to trust one item more than another. This project patches the row-content
+and row-timestep pipelines so each item's own value actually drives its own
+row, independently, verified directly (not just parsed and ignored).
+
+**Multiple simultaneous reference characters work correctly out of the box**
+once the two bugs above are fixed. An earlier iteration of this project
+added a whole per-reference position/strength ("anchoring") system to try
+to force multiple references into one shared scene; extensive same-seed A/B
+testing showed that plain, unanchored multi-reference conditioning already
+produces clean co-presence, so that system was removed rather than kept as
+an unused, confusing knob.
 
 ## Nodes
 
