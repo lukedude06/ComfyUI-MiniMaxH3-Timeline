@@ -49,17 +49,26 @@ to upload an image, video, or audio file, then mark its role:
   restricted to the two endpoints).
 - **Ref** -- a reference for identity/character conditioning.
 
-Other settings: `duration_seconds`, and `visual_cond_noise_aug` /
-`audio_cond_noise_aug` -- native MiniMax H3 parameters, real and previously
-unexposed here (nothing ever supplied them, so every generation silently
-used the native default of 0.999/1.0). They control how rigidly *every*
-keyframe/reference row is enforced, all at once -- at the default, a row is
-treated as already-resolved content from the very first sampling step,
-which is the likely cause of a hard cut into a mid-clip keyframe instead of
-a gradual transition into it. Lower `visual_cond_noise_aug` to loosen that,
-at the cost of the keyframe/reference being reproduced less exactly. These
-are global, not per-item -- the native code applies one scalar to every row
-in the generation at once, so there's no meaningful per-item version.
+Every card also has a **`noise_aug`** field (default 0.999, 1.0 = used
+exactly as given). This is a real native MiniMax H3 mechanism: it controls
+how much noise gets blended into that item's content before the model sees
+it, and how "already resolved" the model treats that row as being from the
+very first sampling step. At the default, a row is treated as essentially
+final from step one, which is the likely cause of a hard cut into a
+mid-clip keyframe instead of a gradual transition into it -- lowering
+`noise_aug` on that specific item loosens it, at the cost of that item
+being reproduced less exactly. Native code only reads ONE such value per
+generation and applies it to every row identically; this project patches
+the model's `_cond_video_rows`/`_cond_audio_rows` (the same
+`model.clone().add_object_patch(...)` mechanism used for the bug fixes
+above) so each item's own value is genuinely independent -- verified
+directly, not assumed (two rows with identical source content but
+different `noise_aug` produced different, independently-controlled output).
+
+The Timeline Editor also has global `visual_cond_noise_aug` /
+`audio_cond_noise_aug` settings, used as the fallback for any row that
+doesn't set its own (e.g. if per-item support is ever removed, or for
+items created before this existed).
 
 An earlier iteration also
 exposed `pretimeline_gap_seconds` (how far a reference's pre-timeline slot
