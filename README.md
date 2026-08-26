@@ -205,11 +205,22 @@ Restart ComfyUI. `MiniMax H3 Timeline Editor` and `MiniMax H3 Conditioning
 
 No extra Python dependencies beyond what ComfyUI itself already ships with.
 
-## AI disclosure
+## How this was built
 
-See [AI_DISCLOSURE.md](AI_DISCLOSURE.md) -- most of this code was written
-by Claude (Anthropic) via Claude Code, directed by the repo owner over a
-sustained testing process, not a single generation.
+Most of the code here was written by Claude (Anthropic), via Claude Code,
+working with the repo owner over a sustained, multi-session process -- not
+a single generation. That process included reading the installed MiniMax
+H3 / ComfyUI source directly to find the two native bugs this project
+fixes, building and empirically testing each feature, and real dead ends
+(tried, benchmarked or generation-tested, then reverted when they didn't
+hold up) documented in git history and the Tips section above rather than
+edited out. The repo owner directed the work throughout -- deciding what
+to build, running the actual test generations, catching mistakes along
+the way, and making the final call on every design decision here.
+
+This isn't a legal claim about authorship either way -- copyright
+treatment of AI-assisted code isn't settled law at the time of writing.
+It's a factual account of how the code was actually produced.
 
 ## License
 
