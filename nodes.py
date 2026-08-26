@@ -57,6 +57,7 @@ import nodes
 import comfy.conds
 import comfy.ldm.minimax.model as h3model
 import comfy.model_base
+import comfy.model_management
 from comfy_api.latest import InputImpl
 from comfy_extras import nodes_minimax_h3 as h3
 from comfy_extras.nodes_audio import load as _load_audio_waveform
@@ -252,21 +253,21 @@ class MiniMaxH3TimelineBundle:
     pretimeline_gap_seconds: float = 1.0
     spatial_collision_offset: float = 64.0
     anchor_decouple_scale_seconds: float = 2.0
-    # Native MiniMax H3 parameters, real and exposed (see INPUT_TYPES) --
-    # unlike the fields above, these are a single GLOBAL scalar applied
-    # uniformly to every keyframe/reference row at once (comfy/ldm/minimax/
-    # model.py's _cond_video_rows/_cond_audio_rows read one payload value for
-    # the whole generation, not per-row), so there's no meaningful per-item
-    # version to expose -- this genuinely is a global setting, not a
-    # simplification like pretimeline_gap was. Controls both how much noise
-    # gets mixed into each conditioning row (r = aug*r + (1-aug)*noise) and
-    # what "denoising timestep" that row appears to be at to the network
-    # (max(current_timestep, aug)) -- at the native default 0.999, a keyframe
-    # is treated as essentially already-resolved content from the very first
-    # sampling step, which is why a mid-clip keyframe can produce a hard cut
-    # instead of a gradual transition into it: the model isn't given room to
-    # build up to it. Lowering this loosens that at the cost of the keyframe/
-    # reference being reproduced less exactly.
+    # Native MiniMax H3 parameters (see INPUT_TYPES). Native code reads these
+    # as a single GLOBAL scalar applied uniformly to every keyframe/reference
+    # row of a kind; this project now gives each item its OWN value instead
+    # (see _TimelineItem.noise_aug, _make_fixed_cond_video_rows/_cond_audio_
+    # rows, _make_fixed_forward) so these two fields are effectively dead in
+    # normal use -- build_timeline always resolves a per-item default for
+    # every card (0.999 visual / 1.0 audio if the card never touched it), so
+    # the per-item list passed to the patches is always fully populated and
+    # these globals are never actually read as a fallback. Kept only as the
+    # payload's true global fallback for the theoretical case of an item
+    # with no noise_aug field at all (shouldn't happen through this UI).
+    #
+    # Testing found this does NOT fix a hard cut into a mid-clip keyframe --
+    # that's a duration problem (not enough frames to transition through),
+    # not a noise_aug problem. See README Tips.
     visual_cond_noise_aug: float = 0.999
     audio_cond_noise_aug: float = 1.0
 
@@ -381,8 +382,8 @@ def _frame_index_to_token_index(pixel_frame_index):
 
 
 def _corrected_packed_layout(text_len, latent_t, latent_h, latent_w, audio_t, keyframes=None, refs=None,
-                              frame_count=None, pretimeline_gap=None, spatial_collision_offset=64.0,
-                              anchor_decouple_scale=None):
+                              frame_count=None, audio_keyframes=None, pretimeline_gap=None,
+                              spatial_collision_offset=64.0, anchor_decouple_scale=None):
     """Same construction as comfy.ldm.minimax.model.PackedLayout, reusing its
     own helper functions so this stays in lockstep with core's math -- with
     three changes, all real experiments with no verified-correct behavior to
@@ -579,21 +580,66 @@ def _corrected_packed_layout(text_len, latent_t, latent_h, latent_w, audio_t, ke
     if keyframes:
         for kf in keyframes:
             pixel_index = kf["resolved_frame_index"]
-            if pixel_index == 0:
+            # EXPERIMENTAL video-keyframe path (see _combined_conditioning):
+            # a multi-frame keyframe has no single-frame closed-form shortcut
+            # to reuse, so it always goes through the general token-index
+            # lookup below, using the clip's START frame -- for the "end"
+            # role, that's backdated so the clip's LAST frame lands on
+            # frame_count - 1 instead of its first.
+            vt = kf.get("latent_t", 1)
+            if vt > 1:
+                start_pixel_index = max(0, pixel_index - (vt - 1)) if pixel_index == frame_count - 1 else pixel_index
+                token_index = min(_frame_index_to_token_index(start_pixel_index), latent_t - 1)
+                cond_t = video_origin + token_times[token_index].item()
+                g = h3model._video_grid(vt, frame, cond_t)
+            elif pixel_index == 0:
                 cond_t = video_origin
+                g = torch.empty(frame_rows, 3, dtype=torch.float64)
+                g[:, 0] = cond_t
+                g[:, 1:] = frame
             elif frame_count is not None and pixel_index == frame_count - 1:
                 cond_t = video_origin + sum(h3model._video_t_spans(latent_t)) - h3model.FRAME_RESCALE
+                g = torch.empty(frame_rows, 3, dtype=torch.float64)
+                g[:, 0] = cond_t
+                g[:, 1:] = frame
             else:
                 token_index = min(_frame_index_to_token_index(pixel_index), latent_t - 1)
                 cond_t = video_origin + token_times[token_index].item()
-            g = torch.empty(frame_rows, 3, dtype=torch.float64)
-            g[:, 0] = cond_t
-            g[:, 1:] = frame
-            segments.append(("cond", frame_rows))
+                g = torch.empty(frame_rows, 3, dtype=torch.float64)
+                g[:, 0] = cond_t
+                g[:, 1:] = frame
+            n = frame_rows * vt
+            segments.append(("cond", n))
             pos.append(g)
-            img_pos.append(torch.arange(row, row + frame_rows))
-            img_update.append(torch.zeros(frame_rows, dtype=torch.bool))
-            row += frame_rows
+            img_pos.append(torch.arange(row, row + n))
+            img_update.append(torch.zeros(n, dtype=torch.bool))
+            row += n
+
+    # EXPERIMENTAL: audio keyframes -- fixed audio content pinned to a
+    # specific point in the TARGET's own audio track (a new "cond_audio"
+    # segment kind), not an independent pretimeline reference block like
+    # ref_audio. Reuses _audio_grid exactly like ref_audio does, but
+    # anchored at video_origin + an audio-latent-frame offset instead of
+    # the pretimeline cursor -- same trick the video-keyframe path above
+    # uses (an existing reference-block position builder, repositioned onto
+    # the target's own timeline). Audio position is linear (1 unit per
+    # audio-latent-frame, no per-cycle rescaling like video needs), so no
+    # token-index lookup table is needed here, unlike the video case.
+    if audio_keyframes:
+        for akf in audio_keyframes:
+            audio_index = akf["resolved_audio_frame_index"]
+            rt = akf.get("latent_t", 1)
+            if audio_t is not None and audio_index == audio_t - 1 and rt > 1:
+                start_audio_index = max(0, audio_index - (rt - 1))
+            else:
+                start_audio_index = max(0, min(audio_t - 1, audio_index)) if audio_t is not None else audio_index
+            cond_audio_t = video_origin + start_audio_index
+            n = rt * 2
+            segments.append(("cond_audio", n))
+            pos.append(h3model._audio_grid(cond_audio_t, rt, *target_audio_w))
+            audio_pos.append(torch.arange(row, row + n))
+            audio_update.append(torch.zeros(n, dtype=torch.bool))
+            row += n
 
     for (kind, n, is_audio), p in zip(ref_segments, ref_pos):
         segments.append((kind, n))
@@ -767,7 +813,14 @@ def _make_fixed_forward(original_diffusion_model):
                 aug = float(vis_augs[vis_idx]) if vis_idx < len(vis_augs) else default_vis_aug
                 vis_idx += 1
                 seg_t_list.append(max(t_v, aug))
-            elif kind == "ref_audio":
+            elif kind in ("ref_audio", "cond_audio"):
+                # EXPERIMENTAL: cond_audio is a new segment kind (an audio
+                # keyframe pinned to a specific point in the target's own
+                # audio track, see _corrected_packed_layout) -- shares the
+                # same aud_augs list/consumption order as ref_audio since
+                # _make_fixed_extra_conds builds cond_audio_latents/
+                # cond_audio_noise_augs from keyframe audio THEN ref audio,
+                # matching the physical segment order the layout emits them.
                 aug = float(aud_augs[aud_idx]) if aud_idx < len(aud_augs) else default_aud_aug
                 aud_idx += 1
                 seg_t_list.append(max(t_a, aug))
@@ -775,7 +828,7 @@ def _make_fixed_forward(original_diffusion_model):
                 seg_t_list.append(t_v)
         unique_t = sorted(set(seg_t_list) | {t_v, t_a})
         t_row = {t: i for i, t in enumerate(unique_t)}
-        seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "ref_audio": 2}
+        seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "ref_audio": 2, "cond_audio": 2}
 
         text_tags = payload.get("text_token_tags")
         mod_segments = []
@@ -913,15 +966,31 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
             payload["frame_count"] = kwargs.get("minimax_frame_count", None)
             cond_video_latents.extend(kf["latent"] for kf in keyframes)
             cond_video_noise_augs.extend(kf.get("noise_aug", h3model.VISUAL_COND_TIMESTEP) for kf in keyframes)
+        # EXPERIMENTAL audio keyframes: same idea as video keyframes, but for
+        # the "cond_audio" segment kind (see _corrected_packed_layout and
+        # _make_fixed_forward's seg_tag/seg_t_list handling). Built into
+        # cond_audio_latents/cond_audio_noise_augs BEFORE ref-derived audio,
+        # matching the physical segment order _corrected_packed_layout emits
+        # them (keyframe audio segments come before reference segments).
+        audio_keyframes = kwargs.get("minimax_audio_keyframes", None)
+        cond_audio_latents = []
+        cond_audio_noise_augs = []
+        if audio_keyframes is not None:
+            payload["audio_keyframes"] = audio_keyframes
+            cond_audio_latents.extend(akf["latent"] for akf in audio_keyframes)
+            cond_audio_noise_augs.extend(akf.get("noise_aug", h3model.AUDIO_COND_TIMESTEP) for akf in audio_keyframes)
         if refs is not None:
             payload["refs"] = refs
             cond_video_latents.extend(r["latent"] for r in refs if "latent" in r)
             cond_video_noise_augs.extend(r.get("noise_aug", h3model.VISUAL_COND_TIMESTEP) for r in refs if "latent" in r)
-            payload["cond_audio_latents"] = [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]
-            payload["cond_audio_noise_augs"] = [r.get("noise_aug", h3model.AUDIO_COND_TIMESTEP) for r in refs if r.get("audio_latent") is not None]
+            cond_audio_latents.extend(r["audio_latent"] for r in refs if r.get("audio_latent") is not None)
+            cond_audio_noise_augs.extend(r.get("noise_aug", h3model.AUDIO_COND_TIMESTEP) for r in refs if r.get("audio_latent") is not None)
         if keyframes is not None or refs is not None:
             payload["cond_video_latents"] = cond_video_latents
             payload["cond_video_noise_augs"] = cond_video_noise_augs
+        if audio_keyframes is not None or refs is not None:
+            payload["cond_audio_latents"] = cond_audio_latents
+            payload["cond_audio_noise_augs"] = cond_audio_noise_augs
         if kwargs.get("minimax_visual_cond_noise_aug", None) is not None:
             payload["visual_cond_noise_aug"] = kwargs["minimax_visual_cond_noise_aug"]
         if kwargs.get("minimax_audio_cond_noise_aug", None) is not None:
@@ -937,6 +1006,7 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
                 cross_attn.shape[1], vs[2], (vs[3] + 1) // 2 * 2, (vs[4] + 1) // 2 * 2,
                 latent_shapes[1][-1], keyframes=payload.get("keyframes"),
                 refs=payload.get("refs"), frame_count=payload.get("frame_count"),
+                audio_keyframes=payload.get("audio_keyframes"),
                 pretimeline_gap=h3model.FRAME_RESCALE * 24.0 * pretimeline_gap_seconds,
                 spatial_collision_offset=spatial_collision_offset,
                 anchor_decouple_scale=h3model.FRAME_RESCALE * 24.0 * anchor_decouple_scale_seconds)
@@ -952,6 +1022,15 @@ def _anchor_frame_index(item: _TimelineItem, frame_count: int) -> int | None:
     return max(0, min(frame_count - 1, round(item.anchor_seconds * h3.FPS)))
 
 
+def _anchor_audio_frame_index(item: _TimelineItem, audio_t: int) -> int:
+    """Like _anchor_frame_index but in audio-latent-frame units
+    (h3.AUDIO_LATENT_FPS, not h3.FPS) -- used for an EXPERIMENTAL audio
+    keyframe_mid's placement. Unlike the video case, unset (anchor_seconds
+    < 0) has no meaningful audio equivalent of "unanchored"; callers only
+    use this for keyframe_mid, which always has a real anchor_seconds."""
+    return max(0, min(audio_t - 1, round(max(0.0, item.anchor_seconds) * h3.AUDIO_LATENT_FPS)))
+
+
 def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, length, ref_image_size, timeline: MiniMaxH3TimelineBundle):
     items = timeline.items
     keyframe_start = next((i for i in items if i.role == KEYFRAME_START), None)
@@ -960,33 +1039,106 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
     reference_items = [i for i in items if i.role == REFERENCE]
 
     latent, frame_count = h3._empty_av_latent(width, height, length)
+    target_audio_t = h3.temporal_shape(length)[2]
 
     # --- keyframes (adapted from _empty_image_conditioning) ---
+    # EXPERIMENTAL: video keyframes. Native code (both this project's
+    # earlier version and comfy_extras/nodes_minimax_h3.py's own
+    # MiniMaxH3ImageToVideo) only ever accepts a single image per keyframe
+    # -- confirmed by reading the native node, not assumed. PackedLayout's
+    # keyframe ("cond") segment is built as ONE frame's worth of position
+    # ids per keyframe with no temporal loop, unlike the reference-video
+    # path which already does (_video_grid(vt, r_frame, cursor)). This is a
+    # genuine untested experiment reusing that same multi-frame machinery
+    # for a "cond" segment instead -- no evidence the checkpoint was ever
+    # trained on a multi-frame cond segment, so treat the result as an
+    # open question, not an assumed-working feature. See
+    # _corrected_packed_layout for the position-id side of this.
+    # EXPERIMENTAL, separate from the above: audio keyframes. Reuses
+    # _encode_reference_audio (already generic -- no length constraint like
+    # video's %17==5 patchify grouping) but pins the result to a specific
+    # point in the TARGET's own audio track (a new "cond_audio" segment
+    # kind) instead of an independent pretimeline reference block. See
+    # _corrected_packed_layout and _make_fixed_forward's seg_tag handling.
     keyframe_images = []
+    keyframe_videos = []  # (frames_tensor, resolved_frame_index, noise_aug) -- multi-frame, kept separate from single-image keyframes
+    audio_keyframe_sources = []  # (audio_mapping, resolved_audio_frame_index, noise_aug)
     keyframes = []
+
+    def _load_keyframe_video(item):
+        frames, _soundtrack, source_fps = _video_parts(_load_media_file(item.filename, "video"))
+        # a video keyframe's audio track is deliberately dropped -- pinning
+        # audio content to a specific point in the target's own audio track
+        # has no architectural equivalent to reuse (see conversation/README);
+        # only the visual content is used here.
+        frames = _resample_video_frames(frames, source_fps)
+        frames = h3._resize(frames, width, height, "center")  # must match the target canvas exactly -- a cond segment shares the target's own frame grid, unlike a reference video's independent canvas
+        if frames.shape[0] > frame_count:
+            frames = frames[:frame_count]
+        count = frames.shape[0]
+        if count < 5:
+            raise ValueError("Video keyframes need at least 5 frames")
+        while count % 17 != 5:
+            count -= 1
+        return frames[:count]
+
     if keyframe_start is not None:
-        if keyframe_start.media_type != "image":
-            raise ValueError("keyframe_start must be an image")
-        source = _load_media_file(keyframe_start.filename, "image")[:1]
-        image = h3._resize(source, width, height, "center")
-        keyframe_images.append(image)
-        keyframes.append({"resolved_frame_index": 0, "image": image, "noise_aug": keyframe_start.noise_aug})
+        if keyframe_start.media_type == "video":
+            frames = _load_keyframe_video(keyframe_start)
+            keyframe_videos.append((frames, 0, keyframe_start.noise_aug))
+        elif keyframe_start.media_type == "audio":
+            audio_keyframe_sources.append((_load_media_file(keyframe_start.filename, "audio"), 0, keyframe_start.noise_aug))
+        elif keyframe_start.media_type == "image":
+            source = _load_media_file(keyframe_start.filename, "image")[:1]
+            image = h3._resize(source, width, height, "center")
+            keyframe_images.append(image)
+            keyframes.append({"resolved_frame_index": 0, "image": image, "noise_aug": keyframe_start.noise_aug})
+        else:
+            raise ValueError("keyframe_start must be an image, video, or audio")
     if keyframe_end is not None:
-        if keyframe_end.media_type != "image":
-            raise ValueError("keyframe_end must be an image")
-        source = _load_media_file(keyframe_end.filename, "image")[:1]
-        image = h3._resize(source, width, height, "center")
-        keyframe_images.append(image)
-        keyframes.append({"resolved_frame_index": frame_count - 1, "image": image, "noise_aug": keyframe_end.noise_aug})
+        if keyframe_end.media_type == "video":
+            frames = _load_keyframe_video(keyframe_end)
+            keyframe_videos.append((frames, frame_count - 1, keyframe_end.noise_aug))
+        elif keyframe_end.media_type == "audio":
+            audio_keyframe_sources.append((_load_media_file(keyframe_end.filename, "audio"), target_audio_t - 1, keyframe_end.noise_aug))
+        elif keyframe_end.media_type == "image":
+            source = _load_media_file(keyframe_end.filename, "image")[:1]
+            image = h3._resize(source, width, height, "center")
+            keyframe_images.append(image)
+            keyframes.append({"resolved_frame_index": frame_count - 1, "image": image, "noise_aug": keyframe_end.noise_aug})
+        else:
+            raise ValueError("keyframe_end must be an image, video, or audio")
     for item in keyframe_mids:
-        if item.media_type != "image":
-            raise ValueError("keyframe_mid items must be images")
-        source = _load_media_file(item.filename, "image")[:1]
-        image = h3._resize(source, width, height, "center")
-        keyframe_images.append(image)
-        keyframes.append({"resolved_frame_index": _anchor_frame_index(item, frame_count), "image": image, "noise_aug": item.noise_aug})
+        if item.media_type == "video":
+            frames = _load_keyframe_video(item)
+            keyframe_videos.append((frames, _anchor_frame_index(item, frame_count), item.noise_aug))
+        elif item.media_type == "audio":
+            audio_keyframe_sources.append((_load_media_file(item.filename, "audio"), _anchor_audio_frame_index(item, target_audio_t), item.noise_aug))
+        elif item.media_type == "image":
+            source = _load_media_file(item.filename, "image")[:1]
+            image = h3._resize(source, width, height, "center")
+            keyframe_images.append(image)
+            keyframes.append({"resolved_frame_index": _anchor_frame_index(item, frame_count), "image": image, "noise_aug": item.noise_aug})
+        else:
+            raise ValueError("keyframe_mid items must be images, videos, or audio")
     for kf in keyframes:
         kf["latent"] = video_vae.encode(kf.pop("image"))
+    for frames, resolved_frame_index, noise_aug in keyframe_videos:
+        video_latent = video_vae.encode(frames)
+        keyframes.append({
+            "resolved_frame_index": resolved_frame_index, "latent": video_latent,
+            "latent_t": video_latent.shape[2], "noise_aug": noise_aug,
+        })
+    audio_keyframes = []
+    for audio_mapping, resolved_audio_frame_index, noise_aug in audio_keyframe_sources:
+        audio_latent, rt = _encode_reference_audio(audio_vae, audio_mapping)
+        if rt > target_audio_t:
+            audio_latent = audio_latent[..., :target_audio_t]
+            rt = target_audio_t
+        audio_keyframes.append({
+            "resolved_audio_frame_index": resolved_audio_frame_index, "latent": audio_latent,
+            "latent_t": rt, "noise_aug": noise_aug,
+        })
 
     # --- references (adapted from _reference_conditioning) ---
     ref_items: list[dict] = []
@@ -1097,9 +1249,11 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
             "minimax_keyframes": keyframes,
             "minimax_frame_count": frame_count,
         })
+    if audio_keyframes:
+        conditioning = node_helpers.conditioning_set_values(conditioning, {"minimax_audio_keyframes": audio_keyframes})
     if ref_blocks:
         conditioning = node_helpers.conditioning_set_values(conditioning, {"minimax_refs": ref_blocks})
-    if keyframes or ref_blocks:
+    if keyframes or audio_keyframes or ref_blocks:
         # Native MiniMax H3 parameters -- see MiniMaxH3TimelineBundle's
         # docstring comment. _make_fixed_extra_conds already forwards these
         # from kwargs into the payload if present; this is what actually
@@ -1167,6 +1321,18 @@ class MiniMaxH3ConditioningTimelineIntegration:
         has_keyframe = any(i.role in KEYFRAME_ROLES for i in timeline.items)
         has_reference = any(i.role == REFERENCE for i in timeline.items)
         has_mid_keyframe = any(i.role == KEYFRAME_MID for i in timeline.items)
+        # EXPERIMENTAL: a video keyframe builds a multi-frame "cond" segment
+        # (see _corrected_packed_layout) that native's own PackedLayout has
+        # no code path for -- it would silently build a mismatched
+        # single-frame-sized position/update array against the actual
+        # multi-frame row count _cond_video_rows produces. Always route
+        # through the corrected layout when one is present.
+        has_video_keyframe = any(i.role in KEYFRAME_ROLES and i.media_type == "video" for i in timeline.items)
+        # Same reasoning as has_video_keyframe, for the new "cond_audio"
+        # segment kind: native's seg_tag/PackedLayout has no entry for it at
+        # all (would KeyError), so any audio keyframe always forces the
+        # corrected layout + our own _make_fixed_forward.
+        has_audio_keyframe = any(i.role in KEYFRAME_ROLES and i.media_type == "audio" for i in timeline.items)
 
         width, height = _canvas_dimensions(resolution, aspect_ratio, 0, 0)
         length = _frame_length(timeline.duration_seconds, h3.FPS)
@@ -1175,10 +1341,11 @@ class MiniMaxH3ConditioningTimelineIntegration:
 
         # The patched layout builder is needed whenever native PackedLayout
         # can't correctly express what's being asked: the keyframe+reference
-        # origin bug (bug 1+2, see module docstring), or any mid-clip keyframe
-        # (native only knows first/last). References no longer anchor, so
-        # that's no longer a trigger condition here.
-        needs_layout_patch = (has_keyframe and has_reference) or has_mid_keyframe
+        # origin bug (bug 1+2, see module docstring), any mid-clip keyframe
+        # (native only knows first/last), or any video keyframe (native has
+        # no multi-frame cond segment code path at all). References no
+        # longer anchor, so that's no longer a trigger condition here.
+        needs_layout_patch = (has_keyframe and has_reference) or has_mid_keyframe or has_video_keyframe or has_audio_keyframe
         # Per-item noise_aug needs to apply to a pure-keyframe or
         # pure-reference generation too, not just combined ones -- separate
         # trigger from the layout patch above. needs_layout_patch always
