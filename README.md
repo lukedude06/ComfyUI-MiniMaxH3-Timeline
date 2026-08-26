@@ -50,20 +50,25 @@ to upload an image, video, or audio file, then mark its role:
 - **Ref** -- a reference for identity/character conditioning.
 
 Every card also has a **`noise_aug`** field (default 0.999, 1.0 = used
-exactly as given). This is a real native MiniMax H3 mechanism: it controls
-how much noise gets blended into that item's content before the model sees
-it, and how "already resolved" the model treats that row as being from the
-very first sampling step. At the default, a row is treated as essentially
-final from step one, which is the likely cause of a hard cut into a
-mid-clip keyframe instead of a gradual transition into it -- lowering
-`noise_aug` on that specific item loosens it, at the cost of that item
-being reproduced less exactly. Native code only reads ONE such value per
-generation and applies it to every row identically; this project patches
-the model's `_cond_video_rows`/`_cond_audio_rows` (the same
+exactly as given). This is a real native MiniMax H3 mechanism made of two
+parts that are normally tied to the same one global scalar: how much noise
+gets blended into that row's own content, and how "resolved" the model is
+told that row is (its apparent denoising timestep, which affects how much
+the AdaLN/RoPE embeddings let it be reasoned about relative to the rest of
+the sequence). Native code reads exactly one such value per generation for
+each of those two things and applies it identically to every row of a kind;
+this project patches `_cond_video_rows`/`_cond_audio_rows` (content) and
+`_forward`'s `seg_t` construction (resolved-ness), via the same
 `model.clone().add_object_patch(...)` mechanism used for the bug fixes
-above) so each item's own value is genuinely independent -- verified
+above, so each row's own value drives both independently -- verified
 directly, not assumed (two rows with identical source content but
 different `noise_aug` produced different, independently-controlled output).
+
+Testing this against an actual hard-cut transition (see Tips below) found
+`noise_aug` isn't a fix for that on its own -- lowering it only trades
+cut-sharpness for content fidelity (noisier/less-accurate reproduction of
+that item) along one axis, at every point along the range. The real cause
+turned out to be something else entirely.
 
 The Timeline Editor also has global `visual_cond_noise_aug` /
 `audio_cond_noise_aug` settings, used as the fallback for any row that
@@ -107,6 +112,19 @@ Typing `@` in the prompt shows the timeline's actual reference items and
 their real `<Picture N>` / `<Video N>` / `<Audio N>` tags, computed the same
 way the backend resolves them at generation time -- no guessing which tag
 maps to which uploaded item.
+
+## Tips
+
+Patterns found through actual testing, not assumed -- added to as more come up.
+
+- **A mid-clip keyframe "hard cutting" into place instead of transitioning
+  smoothly is a duration problem, not a noise_aug problem.** A `Mid`
+  keyframe is pinned to an exact frame; if `duration_seconds` is short,
+  there simply aren't enough frames between the clip's start and that
+  anchor point for the model to interpolate through, so it jumps instead of
+  easing in. `noise_aug` only changes how that keyframe's own row is
+  represented -- it can't create temporal room that isn't there. Increasing
+  `duration_seconds` fixed a hard cut that no `noise_aug` value did.
 
 ## Requirements
 

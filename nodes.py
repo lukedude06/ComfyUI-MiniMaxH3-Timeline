@@ -647,15 +647,15 @@ def _make_fixed_cond_video_rows(original_diffusion_model):
     that list (or if it's missing entirely), so this is safe to install even
     when nothing supplies per-item values.
 
-    Deliberately does NOT patch the DiT's _forward (the ~130-line method
-    that also decides each row's "apparent denoising timestep" via a
-    per-KIND, not per-row, seg_t dict) -- that would mean duplicating a much
-    larger, actively-maintained slice of the model's actual forward pass,
-    a materially higher risk (silent drift on any core update, far larger
-    surface for a subtle bug) than this narrow, well-scoped helper.
-    Per-row noise-mixing (this) is the more direct lever on what content
-    each row actually carries; the timestep-bucket piece staying per-kind
-    is a deliberate scope limit, not an oversight."""
+    On its own this only controls how much noise gets mixed into a row's
+    actual content. The DiT's _forward also derives each row's "apparent
+    denoising timestep" (seg_t, per-KIND not per-row) from the SAME global
+    scalar, which is a separate signal (how much the model trusts/commits to
+    that row) that happens to be tied to the same number. Lowering noise_aug
+    to soften a hard cut therefore also always lowers that trust signal for
+    every row of that kind -- see _make_fixed_forward, which decouples the
+    two by making seg_t per-row too, so a row's content and its apparent
+    timestep can be set independently."""
     def fixed_cond_video_rows(payload, device):
         rows = []
         latents = payload.get("cond_video_latents", [])
@@ -695,6 +695,180 @@ def _make_fixed_cond_audio_rows(original_diffusion_model):
         return torch.cat(rows, dim=0) if rows else None
 
     return fixed_cond_audio_rows
+
+
+def _make_fixed_forward(original_diffusion_model):
+    """Replacement for the DiT's own _forward (comfy/ldm/minimax/model.py)
+    that makes the seg_t "apparent denoising timestep" per-ROW instead of
+    per-KIND. Native code computes ONE seg_t["cond"]/seg_t["ref_img"]/
+    seg_t["ref_audio"] value from the single global noise_aug scalar and
+    applies it to every keyframe/reference row of that kind; this instead
+    walks the same cond_video_noise_augs/cond_audio_noise_augs parallel
+    lists _make_fixed_cond_video_rows/_make_fixed_cond_audio_rows already
+    use, in the same order layout.segments emits "cond"/"ref_img"/
+    "ref_audio" segments (keyframes then refs, matching how
+    _make_fixed_extra_conds built those lists), so each row's own value
+    drives its own timestep bucket.
+
+    This is otherwise a faithful copy of the native method -- everything
+    past the seg_t/mod_segments construction (embedding, AdaLN table
+    lookup, RoPE, the block loop, final_layer) is untouched. Duplicating
+    this much of the forward pass is a real, accepted maintenance cost:
+    it will silently drift from any future upstream change to _forward
+    until this file is updated to match. Captures original_diffusion_model
+    in closure since add_object_patch stores this as a plain instance
+    attribute, not a bound method -- called as self._forward(...) would
+    NOT auto-bind self the way a class-level method does."""
+    def fixed_forward(x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
+        m = original_diffusion_model
+        video_x, audio_x = x[0], x[1]
+        orig_t, orig_h, orig_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
+        video_x = comfy.ldm.common_dit.pad_to_patch_size(video_x, m.patch_size)
+        if video_x.shape[0] != 1:
+            raise ValueError("MiniMax H3 supports batch size 1")
+        payload = minimax_payload or {}
+        device = video_x.device
+        dtype = context.dtype
+
+        latent_t, lat_h, lat_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
+        audio_t = audio_x.shape[-1]
+        text_len = context.shape[1]
+        layout = payload.get("layout")
+        if layout is None or layout.signature != (text_len, latent_t, lat_h, lat_w, audio_t):
+            layout = h3model.PackedLayout(text_len, latent_t, lat_h, lat_w, audio_t,
+                                           keyframes=payload.get("keyframes"),
+                                           refs=payload.get("refs"),
+                                           frame_count=payload.get("frame_count"))
+
+        shift_v = float(transformer_options.get("minimax_h3_sigma_shift_video", m.sigma_shift_video))
+        shift_a = float(transformer_options.get("minimax_h3_sigma_shift_audio", m.sigma_shift_audio))
+        sigma_v = (timestep.flatten()[0] / 1000.0).float().clamp(min=1e-6)
+        t_v = float(1.0 - sigma_v)
+        t_a = float(1.0 - h3model.time_shift_sigma(sigma_v, shift_v, shift_a))
+
+        # per-ROW apparent timestep, unlike native's per-KIND seg_t dict --
+        # walk layout.segments in order, consuming cond_video_noise_augs for
+        # each "cond"/"ref_img" segment and cond_audio_noise_augs for each
+        # "ref_audio" segment (same order _make_fixed_extra_conds built
+        # them: keyframes then refs), falling back to the payload's single
+        # global scalar past the end of either list.
+        default_vis_aug = float(payload.get("visual_cond_noise_aug", h3model.VISUAL_COND_TIMESTEP))
+        default_aud_aug = float(payload.get("audio_cond_noise_aug", h3model.AUDIO_COND_TIMESTEP))
+        vis_augs = payload.get("cond_video_noise_augs") or []
+        aud_augs = payload.get("cond_audio_noise_augs") or []
+        vis_idx = aud_idx = 0
+        seg_t_list = []
+        for a, b, kind in layout.segments:
+            if kind == "video":
+                seg_t_list.append(t_v)
+            elif kind == "audio":
+                seg_t_list.append(t_a)
+            elif kind in ("cond", "ref_img"):
+                aug = float(vis_augs[vis_idx]) if vis_idx < len(vis_augs) else default_vis_aug
+                vis_idx += 1
+                seg_t_list.append(max(t_v, aug))
+            elif kind == "ref_audio":
+                aug = float(aud_augs[aud_idx]) if aud_idx < len(aud_augs) else default_aud_aug
+                aud_idx += 1
+                seg_t_list.append(max(t_a, aug))
+            else:  # text
+                seg_t_list.append(t_v)
+        unique_t = sorted(set(seg_t_list) | {t_v, t_a})
+        t_row = {t: i for i, t in enumerate(unique_t)}
+        seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "ref_audio": 2}
+
+        text_tags = payload.get("text_token_tags")
+        mod_segments = []
+        for seg_idx, (a, b, kind) in enumerate(layout.segments):
+            row_base = t_row[seg_t_list[seg_idx]] * 3
+            if kind == "text" and text_tags is not None:
+                tags = text_tags.view(-1).tolist()
+                run_start = 0
+                for i in range(1, b - a + 1):
+                    if i == b - a or tags[i] != tags[run_start]:
+                        mod_segments.append((a + run_start, a + i, row_base + int(tags[run_start])))
+                        run_start = i
+            else:
+                mod_segments.append((a, b, row_base + seg_tag[kind]))
+
+        img_update = layout.img_update.to(device)
+        audio_update = layout.audio_update.to(device)
+        video_rows = h3model.patchify_video(video_x.to(torch.float32), m.patch_size)
+        audio_rows = h3model.pack_audio(audio_x.to(torch.float32))
+        cond_video_rows = m._cond_video_rows(payload, device)
+        cond_audio_rows = m._cond_audio_rows(payload, device)
+
+        all_video_rows = video_rows
+        if cond_video_rows is not None:
+            all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
+            all_video_rows[~img_update] = cond_video_rows
+            all_video_rows[img_update] = video_rows
+        all_audio_rows = audio_rows
+        if cond_audio_rows is not None:
+            all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
+            all_audio_rows[~audio_update] = cond_audio_rows
+            all_audio_rows[audio_update] = audio_rows
+
+        video_embed = m.video_patch_proj(all_video_rows).to(dtype)
+        audio_embed = m.audio_patch_proj(all_audio_rows).to(dtype)
+        text_states = context[0]
+        if text_states.shape[-1] != m.hidden_size:
+            text_states = m.token_refiner(m.condition_proj(text_states),
+                                          transformer_options=transformer_options)
+
+        h = torch.empty(layout.seq_len, m.hidden_size, dtype=dtype, device=device)
+        voff = aoff = 0
+        for a, b, kind in layout.segments:
+            n = b - a
+            if kind == "text":
+                h[a:b] = text_states
+            elif kind in ("cond", "ref_img", "video"):
+                h[a:b] = video_embed[voff:voff + n]
+                voff += n
+            else:
+                h[a:b] = audio_embed[aoff:aoff + n]
+                aoff += n
+
+        t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
+        if m.use_adaln_curves:
+            table = comfy.model_management.cast_to(m.adaln_t_table, device=device)
+            pos = t_vals.clamp(0.0, 1.0) * (table.shape[0] - 1)
+            i0 = pos.floor().long().clamp(max=table.shape[0] - 2)
+            t_emb = torch.lerp(table[i0], table[i0 + 1], (pos - i0).unsqueeze(1))
+        else:
+            t_emb = m.time_embedder(t_vals).to(dtype)
+
+        rope_freqs = h3model.rope_rotation_table(m.rope_freqs(layout.position_ids, device), dtype)
+
+        patches_replace = transformer_options.get("patches_replace", {})
+        blocks_replace = patches_replace.get("dit", {})
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(m.blocks), device, transformer_options)
+        for i, block in enumerate(m.blocks):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block)
+            if ("double_block", i) in blocks_replace:
+                def block_wrap(args):
+                    return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
+                                         transformer_options=args["transformer_options"])}
+                h = blocks_replace[("double_block", i)](
+                    {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
+                     "transformer_options": transformer_options},
+                    {"original_block": block_wrap})["img"]
+            else:
+                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+        if prefetch_queue is not None:
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
+
+        video_seg = next((a, b, t_row[t_v]) for a, b, k in layout.segments if k == "video")
+        audio_seg = next((a, b, t_row[t_a]) for a, b, k in layout.segments if k == "audio")
+        v, a = m.final_layer(h, t_emb, video_seg, audio_seg)
+
+        video_out = h3model.unpatchify_video(v, latent_t, lat_h // 2, lat_w // 2, m.latents_dim, m.patch_size)
+        video_out = video_out[:, :, :orig_t, :orig_h, :orig_w]
+        audio_out = h3model.unpack_audio(a)
+
+        return [-video_out.to(video_x.dtype), -audio_out.to(audio_x.dtype)]
+
+    return fixed_forward
 
 
 def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_collision_offset, anchor_decouple_scale_seconds):
@@ -1007,26 +1181,36 @@ class MiniMaxH3ConditioningTimelineIntegration:
         needs_layout_patch = (has_keyframe and has_reference) or has_mid_keyframe
         # Per-item noise_aug needs to apply to a pure-keyframe or
         # pure-reference generation too, not just combined ones -- separate
-        # trigger from the layout patch above.
+        # trigger from the layout patch above. needs_layout_patch always
+        # implies this one (both its disjuncts require has_keyframe or
+        # has_reference), so extra_conds gets patched whenever this is true,
+        # not only when needs_layout_patch is -- native extra_conds never
+        # builds cond_video_noise_augs/cond_audio_noise_augs at all, so a
+        # pure-keyframe-only or pure-reference-only generation would
+        # otherwise silently fall back to the global scalar for every row,
+        # with no per-item control despite the card UI showing one.
         needs_noise_aug_patch = has_keyframe or has_reference
-        if needs_layout_patch or needs_noise_aug_patch:
+        if needs_noise_aug_patch:
             model = model.clone()
             original_model = model.model
-            if needs_layout_patch:
-                model.add_object_patch(
-                    "extra_conds",
-                    _make_fixed_extra_conds(
-                        original_model, timeline.pretimeline_gap_seconds, timeline.spatial_collision_offset,
-                        timeline.anchor_decouple_scale_seconds,
-                    ),
-                )
-            if needs_noise_aug_patch:
-                # add_object_patch supports dotted paths (comfy.utils.set_attr/
-                # resolve_attr), so this reaches the DiT instance nested inside
-                # the model directly.
-                original_diffusion_model = original_model.diffusion_model
-                model.add_object_patch("diffusion_model._cond_video_rows", _make_fixed_cond_video_rows(original_diffusion_model))
-                model.add_object_patch("diffusion_model._cond_audio_rows", _make_fixed_cond_audio_rows(original_diffusion_model))
+            model.add_object_patch(
+                "extra_conds",
+                _make_fixed_extra_conds(
+                    original_model, timeline.pretimeline_gap_seconds, timeline.spatial_collision_offset,
+                    timeline.anchor_decouple_scale_seconds,
+                ),
+            )
+            # add_object_patch supports dotted paths (comfy.utils.set_attr/
+            # resolve_attr), so this reaches the DiT instance nested inside
+            # the model directly.
+            original_diffusion_model = original_model.diffusion_model
+            model.add_object_patch("diffusion_model._cond_video_rows", _make_fixed_cond_video_rows(original_diffusion_model))
+            model.add_object_patch("diffusion_model._cond_audio_rows", _make_fixed_cond_audio_rows(original_diffusion_model))
+            # Per-ROW apparent timestep (see _make_fixed_forward's docstring)
+            # -- decouples each row's noise-injection amount (above) from how
+            # "resolved" the model is told that row is, which native ties to
+            # the same single scalar.
+            model.add_object_patch("diffusion_model._forward", _make_fixed_forward(original_diffusion_model))
 
         return (model, conditioning, latent, float(fps))
 
