@@ -241,10 +241,6 @@ edited out. The repo owner directed the work throughout -- deciding what
 to build, running the actual test generations, catching mistakes along
 the way, and making the final call on every design decision here.
 
-This isn't a legal claim about authorship either way -- copyright
-treatment of AI-assisted code isn't settled law at the time of writing.
-It's a factual account of how the code was actually produced.
-
 ## License
 
 MIT -- see [LICENSE](LICENSE).
