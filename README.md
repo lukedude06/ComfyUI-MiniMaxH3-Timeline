@@ -49,7 +49,19 @@ to upload an image, video, or audio file, then mark its role:
   restricted to the two endpoints).
 - **Ref** -- a reference for identity/character conditioning.
 
-The only other setting is `duration_seconds`. An earlier iteration also
+Other settings: `duration_seconds`, and `visual_cond_noise_aug` /
+`audio_cond_noise_aug` -- native MiniMax H3 parameters, real and previously
+unexposed here (nothing ever supplied them, so every generation silently
+used the native default of 0.999/1.0). They control how rigidly *every*
+keyframe/reference row is enforced, all at once -- at the default, a row is
+treated as already-resolved content from the very first sampling step,
+which is the likely cause of a hard cut into a mid-clip keyframe instead of
+a gradual transition into it. Lower `visual_cond_noise_aug` to loosen that,
+at the cost of the keyframe/reference being reproduced less exactly. These
+are global, not per-item -- the native code applies one scalar to every row
+in the generation at once, so there's no meaningful per-item version.
+
+An earlier iteration also
 exposed `pretimeline_gap_seconds` (how far a reference's pre-timeline slot
 sits from the video's real start); a direct A/B test (0.3s vs 3.0s, same
 seed/prompt/references otherwise) showed no meaningfully different result,
