@@ -49,8 +49,13 @@ to upload an image, video, or audio file, then mark its role:
   restricted to the two endpoints).
 - **Ref** -- a reference for identity/character conditioning.
 
-Global settings: `duration_seconds` and `pretimeline_gap_seconds` (how far a
-reference's default pre-timeline slot sits from the video's real start).
+The only other setting is `duration_seconds`. An earlier iteration also
+exposed `pretimeline_gap_seconds` (how far a reference's pre-timeline slot
+sits from the video's real start); a direct A/B test (0.3s vs 3.0s, same
+seed/prompt/references otherwise) showed no meaningfully different result,
+so it was removed from the UI for the same reason the anchoring system was
+-- it's a fixed default internally, not something worth exposing as a
+setting users could mistakenly change expecting an effect.
 
 ### MiniMax H3 Conditioning (Timeline Integration)
 

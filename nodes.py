@@ -236,14 +236,16 @@ class _TimelineItem:
 class MiniMaxH3TimelineBundle:
     items: tuple[_TimelineItem, ...]
     duration_seconds: float
-    pretimeline_gap_seconds: float = 1.0
-    # Not exposed as widgets anymore (removed after testing showed plain
-    # unanchored references already produce clean co-presence on their own --
-    # see module docstring), but left as fixed defaults rather than deleted:
-    # the packed-layout math that reads these is still fully intact and
+    # None of the fields below are exposed as widgets anymore. pretimeline_gap
+    # was tested directly (0.3s vs 3.0s, same seed/prompt/references
+    # otherwise) and produced no meaningfully different result either --
+    # same conclusion as the anchoring system it's a close cousin of. Left as
+    # fixed defaults rather than deleted: the packed-layout math that reads
+    # these is still fully intact and
     # correct, just never triggered since references no longer set
     # anchor_frame_index. Recoverable by re-exposing widgets, not by
     # rewriting math.
+    pretimeline_gap_seconds: float = 1.0
     spatial_collision_offset: float = 64.0
     anchor_decouple_scale_seconds: float = 2.0
 
@@ -273,9 +275,6 @@ class MiniMaxH3TimelineEditor:
         return {
             "required": {
                 "duration_seconds": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 15.0, "step": 0.1}),
-                # How far (in seconds, at the model's fixed 24fps) a reference's
-                # generic pre-timeline slot sits from the video's real start.
-                "pretimeline_gap_seconds": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05}),
                 # {filename, type, role, anchor_seconds}[] -- populated by the
                 # frontend's upload cards, not meant to be hand-edited. See
                 # MAX_MEDIA for the (non-architectural) item cap.
@@ -287,7 +286,7 @@ class MiniMaxH3TimelineEditor:
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
 
-    def build_timeline(self, duration_seconds, pretimeline_gap_seconds=1.0, media_json="[]"):
+    def build_timeline(self, duration_seconds, media_json="[]"):
         try:
             raw_items = json.loads(media_json or "[]")
         except (TypeError, ValueError):
@@ -323,7 +322,7 @@ class MiniMaxH3TimelineEditor:
         keyframe_ends = [i for i in items if i.role == KEYFRAME_END]
         if len(keyframe_starts) > 1 or len(keyframe_ends) > 1:
             raise ValueError("MiniMax H3 Timeline Editor accepts at most one keyframe_start and one keyframe_end item")
-        return (MiniMaxH3TimelineBundle(tuple(items), float(duration_seconds), float(pretimeline_gap_seconds)),)
+        return (MiniMaxH3TimelineBundle(tuple(items), float(duration_seconds)),)
 
 
 def _frame_index_to_token_index(pixel_frame_index):
