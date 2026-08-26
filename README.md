@@ -117,6 +117,14 @@ maps to which uploaded item.
 
 Patterns found through actual testing, not assumed -- added to as more come up.
 
+- **This works well with the fl2va-only, ref2va-only, and combined
+  fl2va_ref2va_adaln_blend checkpoints alike** -- comparing the same
+  timeline/prompt across all three showed no meaningful output difference.
+  That's not proof one checkpoint isn't better suited to some specific kind
+  of shot than another -- only a limited set of image types/combinations
+  has been tried so far. Experiment with checkpoint choice yourself rather
+  than assuming this pack requires the blend checkpoint specifically.
+
 - **A mid-clip keyframe "hard cutting" into place instead of transitioning
   smoothly is a duration problem, not a noise_aug problem.** A `Mid`
   keyframe is pinned to an exact frame; if `duration_seconds` is short,
