@@ -9,6 +9,8 @@ piece of media is trusted -- none of which native code has a path for, not
 just a bug-fix wrapper around what already existed. Two nodes: `MiniMax H3
 Timeline Editor` and `MiniMax H3 Conditioning (Timeline Integration)`.
 
+![Example workflow graph](workflow/example_workflow.png)
+
 ## Why this exists
 
 Several real gaps in native ComfyUI's MiniMax H3 support, each confirmed
@@ -235,8 +237,6 @@ Restart ComfyUI. `MiniMax H3 Timeline Editor` and `MiniMax H3 Conditioning
 (Timeline Integration)` will appear in the node search.
 
 ## Example workflow
-
-![Example workflow graph](workflow/example_workflow.png)
 
 [`workflow/MiniMaxH3_Timeline_Template.json`](workflow/MiniMaxH3_Timeline_Template.json)
 is a real, correctly-wired workflow -- drag it into ComfyUI to load it
