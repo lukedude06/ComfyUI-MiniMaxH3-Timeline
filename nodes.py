@@ -832,13 +832,23 @@ class MiniMaxH3ConditioningTimelineIntegration:
     dropdown shows, and only becomes visible after the fact (in the console
     log). Wiring a specific Load Diffusion Model node's output directly
     means there is nothing to substitute -- what's connected on the canvas,
-    before you run anything, IS what gets used."""
+    before you run anything, IS what gets used.
+
+    video_vae/audio_vae are REQUIRED INPUTS (this node uses them internally
+    to encode keyframe/reference media into latents) but are deliberately
+    NOT re-emitted as outputs. Only `model` needs to flow out of this node --
+    it may be a cloned, patched object, not the same one that came in (see
+    below) -- so it's the only thing downstream nodes are forced to route
+    through here. VAEDecode/VAEDecodeAudio should wire directly to the same
+    Load VAE nodes connected here instead of through this node's output,
+    which used to exist purely as a passthrough and just added an unneeded
+    dependency for anyone whose graph already wires VAE elsewhere."""
 
     CATEGORY = "MiniMax H3 Easy/Timeline"
     FUNCTION = "generate"
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "VAE", "VAE", "FLOAT")
-    RETURN_NAMES = ("model", "positive", "latent", "video_vae", "audio_vae", "fps")
-    DESCRIPTION = "Builds combined keyframe+reference conditioning from a Timeline Editor bundle. Connect a MODEL from Load Diffusion Model, a CLIP from Load CLIP (type=minimax), and two VAEs from Load VAE -- not MiniMax H3 Easy Loader's bundle -- so the checkpoint in use is whatever's visibly wired in, not resolved silently at runtime."
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "FLOAT")
+    RETURN_NAMES = ("model", "positive", "latent", "fps")
+    DESCRIPTION = "Builds combined keyframe+reference conditioning from a Timeline Editor bundle. Connect a MODEL from Load Diffusion Model, a CLIP from Load CLIP (type=minimax), and two VAEs from Load VAE -- not MiniMax H3 Easy Loader's bundle -- so the checkpoint in use is whatever's visibly wired in, not resolved silently at runtime. Wire VAEDecode/VAEDecodeAudio directly to the same Load VAE nodes, not through this node's output -- only `model` needs to come from here."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -884,7 +894,7 @@ class MiniMaxH3ConditioningTimelineIntegration:
                 ),
             )
 
-        return (model, conditioning, latent, video_vae, audio_vae, float(fps))
+        return (model, conditioning, latent, float(fps))
 
 
 NODE_CLASS_MAPPINGS = {

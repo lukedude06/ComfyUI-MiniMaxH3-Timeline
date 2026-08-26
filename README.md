@@ -60,21 +60,22 @@ with `type` set to `minimax`, and two `Load VAE` nodes -- not a bundle node
 with internal fallback logic. Whatever checkpoint is visibly connected on
 the canvas is what gets used; there's nothing to silently substitute.
 
-Outputs `model`, `positive` (conditioning), `latent`, `video_vae`,
-`audio_vae`, `fps` -- wire these into a normal `SamplerCustomAdvanced` /
-`VAEDecode` / `VAEDecodeAudio` / `CreateVideo` chain like any other ComfyUI
-video workflow.
+`video_vae`/`audio_vae` are required inputs -- this node uses them
+internally to encode keyframe/reference media into latents -- but are not
+re-emitted as outputs. Outputs are just `model`, `positive` (conditioning),
+`latent`, `fps`. Wire the *same* `Load VAE` nodes connected here directly to
+`VAEDecode`/`VAEDecodeAudio` as well (one `Load VAE` feeding both this node
+and the decoder, not a chain through this node) -- fan-out from a single
+loader, not a passthrough dependency.
 
-**Use the `model` output of this node, not the `Load Diffusion Model` node
-directly, downstream (LoRA, attention patches, sampling, etc.).** They are
-not the same object when a keyframe and a reference are combined or a
-mid-clip keyframe is used: this node clones the model and attaches the
-corrected `extra_conds` here -- that's where the two bug fixes above
-actually get applied. Wiring the original loader's `MODEL` output around
-this node instead silently reintroduces both bugs, with no error. `video_vae`
-and `audio_vae` are plain passthroughs, unlike `model` -- wiring `Load VAE`
-directly to `VAEDecode`/`VAEDecodeAudio` instead works identically and is
-fine to do.
+**`model` is the one output you must actually route through this node --
+never bypass it with the loader's own `MODEL` output downstream (LoRA,
+attention patches, sampling, etc.).** They are not the same object when a
+keyframe and a reference are combined or a mid-clip keyframe is used: this
+node clones the model and attaches the corrected `extra_conds` here --
+that's where the two bug fixes above actually get applied. Wiring
+`Load Diffusion Model`'s output around this node instead silently
+reintroduces both bugs, with no error.
 
 Typing `@` in the prompt shows the timeline's actual reference items and
 their real `<Picture N>` / `<Video N>` / `<Audio N>` tags, computed the same
