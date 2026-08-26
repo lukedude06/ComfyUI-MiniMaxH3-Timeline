@@ -297,14 +297,18 @@ class MiniMaxH3TimelineEditor:
         return {
             "required": {
                 "duration_seconds": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 15.0, "step": 0.1}),
-                # How rigidly EVERY keyframe/reference row is enforced, all at
-                # once (native MiniMax H3 parameter, applied globally -- see
-                # MiniMaxH3TimelineBundle's docstring comment for the full
-                # mechanism). 0.999 is the native default: rows are treated as
-                # already-resolved from the first sampling step, which can
-                # cause a hard cut into a mid-clip keyframe instead of a
-                # gradual transition. Lower to loosen that, at the cost of
-                # less exact reproduction of keyframe/reference content.
+                # These two globals are effectively dead in normal use --
+                # every card in the Timeline Editor always supplies its own
+                # per-item noise_aug (see _TimelineItem.noise_aug), so these
+                # never actually get read as a fallback. Kept only for the
+                # payload's true global-fallback case (an item with no
+                # noise_aug field at all, which shouldn't happen through this
+                # UI). 0.999 is the native per-modality default: how much a
+                # row is trusted/how noise-free it's treated as from the
+                # first sampling step. Does NOT fix a hard cut into a
+                # mid-clip keyframe -- that's a duration problem (see README
+                # Tips), confirmed by direct testing after this was
+                # originally (and wrongly) assumed to be the fix.
                 "visual_cond_noise_aug": ("FLOAT", {"default": 0.999, "min": 0.0, "max": 1.0, "step": 0.001}),
                 # Same mechanism, for reference AUDIO rows specifically.
                 "audio_cond_noise_aug": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
@@ -580,7 +584,7 @@ def _corrected_packed_layout(text_len, latent_t, latent_h, latent_w, audio_t, ke
     if keyframes:
         for kf in keyframes:
             pixel_index = kf["resolved_frame_index"]
-            # EXPERIMENTAL video-keyframe path (see _combined_conditioning):
+            # Video-keyframe path (see _combined_conditioning):
             # a multi-frame keyframe has no single-frame closed-form shortcut
             # to reuse, so it always goes through the general token-index
             # lookup below, using the clip's START frame -- for the "end"
@@ -615,7 +619,7 @@ def _corrected_packed_layout(text_len, latent_t, latent_h, latent_w, audio_t, ke
             img_update.append(torch.zeros(n, dtype=torch.bool))
             row += n
 
-    # EXPERIMENTAL: audio keyframes -- fixed audio content pinned to a
+    # Audio keyframes -- fixed audio content pinned to a
     # specific point in the TARGET's own audio track (a new "cond_audio"
     # segment kind), not an independent pretimeline reference block like
     # ref_audio. Reuses _audio_grid exactly like ref_audio does, but
@@ -814,7 +818,7 @@ def _make_fixed_forward(original_diffusion_model):
                 vis_idx += 1
                 seg_t_list.append(max(t_v, aug))
             elif kind in ("ref_audio", "cond_audio"):
-                # EXPERIMENTAL: cond_audio is a new segment kind (an audio
+                # cond_audio is a new segment kind (an audio
                 # keyframe pinned to a specific point in the target's own
                 # audio track, see _corrected_packed_layout) -- shares the
                 # same aud_augs list/consumption order as ref_audio since
@@ -966,7 +970,7 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
             payload["frame_count"] = kwargs.get("minimax_frame_count", None)
             cond_video_latents.extend(kf["latent"] for kf in keyframes)
             cond_video_noise_augs.extend(kf.get("noise_aug", h3model.VISUAL_COND_TIMESTEP) for kf in keyframes)
-        # EXPERIMENTAL audio keyframes: same idea as video keyframes, but for
+        # Audio keyframes: same idea as video keyframes, but for
         # the "cond_audio" segment kind (see _corrected_packed_layout and
         # _make_fixed_forward's seg_tag/seg_t_list handling). Built into
         # cond_audio_latents/cond_audio_noise_augs BEFORE ref-derived audio,
@@ -1024,7 +1028,7 @@ def _anchor_frame_index(item: _TimelineItem, frame_count: int) -> int | None:
 
 def _anchor_audio_frame_index(item: _TimelineItem, audio_t: int) -> int:
     """Like _anchor_frame_index but in audio-latent-frame units
-    (h3.AUDIO_LATENT_FPS, not h3.FPS) -- used for an EXPERIMENTAL audio
+    (h3.AUDIO_LATENT_FPS, not h3.FPS) -- used for an audio
     keyframe_mid's placement. Unlike the video case, unset (anchor_seconds
     < 0) has no meaningful audio equivalent of "unanchored"; callers only
     use this for keyframe_mid, which always has a real anchor_seconds."""
@@ -1042,19 +1046,21 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
     target_audio_t = h3.temporal_shape(length)[2]
 
     # --- keyframes (adapted from _empty_image_conditioning) ---
-    # EXPERIMENTAL: video keyframes. Native code (both this project's
-    # earlier version and comfy_extras/nodes_minimax_h3.py's own
-    # MiniMaxH3ImageToVideo) only ever accepts a single image per keyframe
-    # -- confirmed by reading the native node, not assumed. PackedLayout's
-    # keyframe ("cond") segment is built as ONE frame's worth of position
-    # ids per keyframe with no temporal loop, unlike the reference-video
-    # path which already does (_video_grid(vt, r_frame, cursor)). This is a
-    # genuine untested experiment reusing that same multi-frame machinery
-    # for a "cond" segment instead -- no evidence the checkpoint was ever
-    # trained on a multi-frame cond segment, so treat the result as an
-    # open question, not an assumed-working feature. See
-    # _corrected_packed_layout for the position-id side of this.
-    # EXPERIMENTAL, separate from the above: audio keyframes. Reuses
+    # Video keyframes -- verified working via real generation tests
+    # (stitching separate clips together, both as a hard cut and as a
+    # genuine smooth transition depending on prompt/duration), no native
+    # precedent. Native code (both this project's earlier version and
+    # comfy_extras/nodes_minimax_h3.py's own MiniMaxH3ImageToVideo) only
+    # ever accepts a single image per keyframe -- confirmed by reading the
+    # native node, not assumed. PackedLayout's keyframe ("cond") segment is
+    # built as ONE frame's worth of position ids per keyframe with no
+    # temporal loop, unlike the reference-video path which already does
+    # (_video_grid(vt, r_frame, cursor)). This reuses that same multi-frame
+    # machinery for a "cond" segment instead -- nothing in the checkpoint's
+    # public training details confirms it was trained on a multi-frame cond
+    # segment specifically, but real generation testing confirms the result
+    # works. See _corrected_packed_layout for the position-id side of this.
+    # Separate from the above: audio keyframes. Reuses
     # _encode_reference_audio (already generic -- no length constraint like
     # video's %17==5 patchify grouping) but pins the result to a specific
     # point in the TARGET's own audio track (a new "cond_audio" segment
@@ -1321,7 +1327,7 @@ class MiniMaxH3ConditioningTimelineIntegration:
         has_keyframe = any(i.role in KEYFRAME_ROLES for i in timeline.items)
         has_reference = any(i.role == REFERENCE for i in timeline.items)
         has_mid_keyframe = any(i.role == KEYFRAME_MID for i in timeline.items)
-        # EXPERIMENTAL: a video keyframe builds a multi-frame "cond" segment
+        # A video keyframe builds a multi-frame "cond" segment
         # (see _corrected_packed_layout) that native's own PackedLayout has
         # no code path for -- it would silently build a mismatched
         # single-frame-sized position/update array against the actual

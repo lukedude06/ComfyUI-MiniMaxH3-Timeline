@@ -246,9 +246,11 @@ function installTimelineUI(node) {
             // patches the DiT's own row-building so this item's value is
             // genuinely independent of every other item's. 1.0 = this row's
             // content is used exactly as given; lower values blend it toward
-            // noise before the model sees it, and make the model treat it as
-            // less "already resolved," which can soften a hard cut into a
-            // mid-clip keyframe at the cost of matching it less exactly.
+            // noise before the model sees it, at the cost of matching it
+            // less exactly. Does NOT fix a hard cut into a mid-clip
+            // keyframe -- that's a duration_seconds problem, confirmed by
+            // direct testing (see README Tips) after this was originally,
+            // wrongly, assumed to be the fix.
             const augRow = document.createElement("div");
             augRow.className = "h3c-seconds";
             const augLabel = document.createElement("span");
