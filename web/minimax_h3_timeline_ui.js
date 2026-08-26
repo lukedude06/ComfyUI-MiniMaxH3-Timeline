@@ -104,7 +104,12 @@ function defaultItem() {
     // References had their own anchor_channel/anchor_closeness controls;
     // removed after testing showed they weren't needed for co-presence --
     // see nodes_timeline.py's module docstring.
-    return { filename: null, type: null, role: ROLE_REF, anchor_seconds: -1 };
+    // noise_aug: real per-item control (unlike the removed anchor system) --
+    // patches the DiT's own _cond_video_rows/_cond_audio_rows so each row's
+    // value is genuinely independent, not just a global scalar. Default
+    // matches the native per-modality default (visual 0.999, audio 1.0),
+    // resolved server-side from the item's actual media type if left unset.
+    return { filename: null, type: null, role: ROLE_REF, anchor_seconds: -1, noise_aug: 0.999 };
 }
 
 // --- Timeline Editor card UI -------------------------------------------
@@ -235,6 +240,33 @@ function installTimelineUI(node) {
             if (item.role === ROLE_MID) {
                 appendSecondsRow(card, item, "at:", "anchor_seconds", commit);
             }
+
+            // Real per-item control, unlike the removed anchor system --
+            // patches the DiT's own row-building so this item's value is
+            // genuinely independent of every other item's. 1.0 = this row's
+            // content is used exactly as given; lower values blend it toward
+            // noise before the model sees it, and make the model treat it as
+            // less "already resolved," which can soften a hard cut into a
+            // mid-clip keyframe at the cost of matching it less exactly.
+            const augRow = document.createElement("div");
+            augRow.className = "h3c-seconds";
+            const augLabel = document.createElement("span");
+            augLabel.textContent = "noise_aug:";
+            const augInput = document.createElement("input");
+            augInput.type = "number";
+            augInput.step = "0.01";
+            augInput.min = "0";
+            augInput.max = "1";
+            augInput.value = item.noise_aug ?? 0.999;
+            augInput.onclick = (e) => e.stopPropagation();
+            augInput.onchange = () => {
+                const v = Math.max(0, Math.min(1, Number(augInput.value)));
+                item.noise_aug = Number.isNaN(v) ? 0.999 : v;
+                augInput.value = item.noise_aug;
+                commit();
+            };
+            augRow.append(augLabel, augInput);
+            card.appendChild(augRow);
 
             const tag = document.createElement("div");
             tag.className = "h3c-tag";

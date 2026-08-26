@@ -230,6 +230,10 @@ class _TimelineItem:
     role: str
     item_index: int
     anchor_seconds: float = ANCHOR_UNSET  # keyframe_mid placement only; references no longer use this
+    # PER-ITEM noise_aug (unlike MiniMaxH3TimelineBundle's global
+    # visual_cond_noise_aug/audio_cond_noise_aug) -- see _make_fixed_cond_rows
+    # for how this becomes real per-row control, not just a global scalar.
+    noise_aug: float = 0.999
 
 
 @dataclass(frozen=True)
@@ -345,7 +349,12 @@ class MiniMaxH3TimelineEditor:
                 anchor_seconds = float(raw.get("anchor_seconds", ANCHOR_UNSET))
                 if role == KEYFRAME_MID and anchor_seconds < 0.0:
                     raise ValueError(f"Timeline item {index} ({filename}) is role keyframe_mid but has no anchor_seconds set")
-            items.append(_TimelineItem(media_type, filename, role, index, anchor_seconds))
+            # PER-ITEM noise_aug default mirrors the native per-modality
+            # default (0.999 visual, 1.0 audio) when the item doesn't set
+            # its own value.
+            default_noise_aug = 1.0 if media_type == "audio" else 0.999
+            item_noise_aug = float(raw.get("noise_aug", default_noise_aug))
+            items.append(_TimelineItem(media_type, filename, role, index, anchor_seconds, item_noise_aug))
         keyframe_starts = [i for i in items if i.role == KEYFRAME_START]
         keyframe_ends = [i for i in items if i.role == KEYFRAME_END]
         if len(keyframe_starts) > 1 or len(keyframe_ends) > 1:
@@ -627,6 +636,67 @@ def _corrected_packed_layout(text_len, latent_t, latent_h, latent_w, audio_t, ke
     return layout
 
 
+def _make_fixed_cond_video_rows(original_diffusion_model):
+    """Per-item replacement for the DiT's own _cond_video_rows (comfy/ldm/
+    minimax/model.py), which reads exactly ONE visual_cond_noise_aug scalar
+    from the payload and applies it identically to every keyframe/reference
+    row. This reads a PARALLEL cond_video_noise_augs list instead (built by
+    _make_fixed_extra_conds, one entry per row, same order as
+    cond_video_latents) so each row's own value is actually used -- falls
+    back to the payload's single global value for any row past the end of
+    that list (or if it's missing entirely), so this is safe to install even
+    when nothing supplies per-item values.
+
+    Deliberately does NOT patch the DiT's _forward (the ~130-line method
+    that also decides each row's "apparent denoising timestep" via a
+    per-KIND, not per-row, seg_t dict) -- that would mean duplicating a much
+    larger, actively-maintained slice of the model's actual forward pass,
+    a materially higher risk (silent drift on any core update, far larger
+    surface for a subtle bug) than this narrow, well-scoped helper.
+    Per-row noise-mixing (this) is the more direct lever on what content
+    each row actually carries; the timestep-bucket piece staying per-kind
+    is a deliberate scope limit, not an oversight."""
+    def fixed_cond_video_rows(payload, device):
+        rows = []
+        latents = payload.get("cond_video_latents", [])
+        default_aug = float(payload.get("visual_cond_noise_aug", h3model.VISUAL_COND_TIMESTEP))
+        augs = payload.get("cond_video_noise_augs") or []
+        seed = int(payload.get("seed", 0))
+        for i, z in enumerate(latents):
+            aug = float(augs[i]) if i < len(augs) else default_aug
+            r = h3model.patchify_video(z.to(torch.float32), original_diffusion_model.patch_size)
+            if aug < 1.0:
+                gen = torch.Generator("cpu").manual_seed(seed)
+                noise = torch.randn(r.shape, generator=gen, dtype=torch.float32)
+                r = aug * r + (1.0 - aug) * noise.to(r.device)
+            rows.append(r.to(device))
+        return torch.cat(rows, dim=0) if rows else None
+
+    return fixed_cond_video_rows
+
+
+def _make_fixed_cond_audio_rows(original_diffusion_model):
+    """Same per-item treatment as _make_fixed_cond_video_rows, for reference
+    audio rows (cond_audio_latents / cond_audio_noise_augs)."""
+    def fixed_cond_audio_rows(payload, device):
+        rows = []
+        latents = payload.get("cond_audio_latents", [])
+        default_aug = float(payload.get("audio_cond_noise_aug", h3model.AUDIO_COND_TIMESTEP))
+        augs = payload.get("cond_audio_noise_augs") or []
+        seed = int(payload.get("seed", 0)) + 1
+        for i, z in enumerate(latents):
+            aug = float(augs[i]) if i < len(augs) else default_aug
+            r = h3model.pack_audio(z.to(torch.float32))
+            if aug < 1.0:
+                gen = torch.Generator("cpu").manual_seed(seed)
+                noise = torch.randn(r.shape, generator=gen, dtype=torch.float32)
+                r = aug * r + (1.0 - aug) * noise.to(r.device)
+            rows.append(r.to(device))
+        return torch.cat(rows, dim=0) if rows else None
+
+    return fixed_cond_audio_rows
+
+
 def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_collision_offset, anchor_decouple_scale_seconds):
     """Returns a drop-in replacement for original_model.extra_conds, fixing
     the two verified bugs. Captures original_model in closure since
@@ -658,16 +728,26 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
         # THE FIX for bug 1: concatenate instead of the refs branch
         # unconditionally overwriting what the keyframes branch set.
         cond_video_latents = []
+        # PER-ITEM noise_aug: a parallel list, same order/length as
+        # cond_video_latents/cond_audio_latents, consumed by the patched
+        # _cond_video_rows/_cond_audio_rows (see _make_fixed_cond_rows) --
+        # native code only reads one global scalar per generation, this is
+        # what makes each row's own value actually matter.
+        cond_video_noise_augs = []
         if keyframes is not None:
             payload["keyframes"] = keyframes
             payload["frame_count"] = kwargs.get("minimax_frame_count", None)
             cond_video_latents.extend(kf["latent"] for kf in keyframes)
+            cond_video_noise_augs.extend(kf.get("noise_aug", h3model.VISUAL_COND_TIMESTEP) for kf in keyframes)
         if refs is not None:
             payload["refs"] = refs
             cond_video_latents.extend(r["latent"] for r in refs if "latent" in r)
+            cond_video_noise_augs.extend(r.get("noise_aug", h3model.VISUAL_COND_TIMESTEP) for r in refs if "latent" in r)
             payload["cond_audio_latents"] = [r["audio_latent"] for r in refs if r.get("audio_latent") is not None]
+            payload["cond_audio_noise_augs"] = [r.get("noise_aug", h3model.AUDIO_COND_TIMESTEP) for r in refs if r.get("audio_latent") is not None]
         if keyframes is not None or refs is not None:
             payload["cond_video_latents"] = cond_video_latents
+            payload["cond_video_noise_augs"] = cond_video_noise_augs
         if kwargs.get("minimax_visual_cond_noise_aug", None) is not None:
             payload["visual_cond_noise_aug"] = kwargs["minimax_visual_cond_noise_aug"]
         if kwargs.get("minimax_audio_cond_noise_aug", None) is not None:
@@ -716,21 +796,21 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
         source = _load_media_file(keyframe_start.filename, "image")[:1]
         image = h3._resize(source, width, height, "center")
         keyframe_images.append(image)
-        keyframes.append({"resolved_frame_index": 0, "image": image})
+        keyframes.append({"resolved_frame_index": 0, "image": image, "noise_aug": keyframe_start.noise_aug})
     if keyframe_end is not None:
         if keyframe_end.media_type != "image":
             raise ValueError("keyframe_end must be an image")
         source = _load_media_file(keyframe_end.filename, "image")[:1]
         image = h3._resize(source, width, height, "center")
         keyframe_images.append(image)
-        keyframes.append({"resolved_frame_index": frame_count - 1, "image": image})
+        keyframes.append({"resolved_frame_index": frame_count - 1, "image": image, "noise_aug": keyframe_end.noise_aug})
     for item in keyframe_mids:
         if item.media_type != "image":
             raise ValueError("keyframe_mid items must be images")
         source = _load_media_file(item.filename, "image")[:1]
         image = h3._resize(source, width, height, "center")
         keyframe_images.append(image)
-        keyframes.append({"resolved_frame_index": _anchor_frame_index(item, frame_count), "image": image})
+        keyframes.append({"resolved_frame_index": _anchor_frame_index(item, frame_count), "image": image, "noise_aug": item.noise_aug})
     for kf in keyframes:
         kf["latent"] = video_vae.encode(kf.pop("image"))
 
@@ -762,7 +842,7 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
             ref_items.append({"type": "image", "data": resized})
             ref_blocks.append({
                 "kind": "image", "latent_h": int(z.shape[-2]), "latent_w": int(z.shape[-1]), "latent": z,
-                "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0,
+                "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0, "noise_aug": item.noise_aug,
             })
             tag_by_input[item.item_index] = f"<Picture {picture_ordinal}>"
             continue
@@ -776,7 +856,7 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
         ref_items.append({"type": "image", "data": resized})
         ref_blocks.append({
             "kind": "image", "latent_h": target_h // 16, "latent_w": target_w // 16, "latent": video_vae.encode(resized),
-            "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0,
+            "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0, "noise_aug": item.noise_aug,
         })
         tag_by_input[item.item_index] = f"<Picture {picture_ordinal}>"
 
@@ -811,7 +891,7 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
             "kind": "video_audio" if audio_t else "video",
             "latent_t": video_latent.shape[2], "latent_h": canvas_h // 16, "latent_w": canvas_w // 16,
             "ref_audio_t": audio_t, "latent": video_latent, "audio_latent": audio_latent,
-            "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0,
+            "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0, "noise_aug": item.noise_aug,
         })
         tag_by_input[item.item_index] = f"<Video {video_ordinal}>"
 
@@ -822,7 +902,7 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
         ref_items.append({"type": "audio"})
         ref_blocks.append({
             "kind": "audio", "ref_audio_t": audio_t, "audio_latent": audio_latent,
-            "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0,
+            "anchor_frame_index": _anchor_frame_index(item, frame_count), "anchor_closeness": 1.0, "noise_aug": item.noise_aug,
         })
         tag_by_input[item.item_index] = f"<Audio {audio_ordinal}>"
 
@@ -924,15 +1004,29 @@ class MiniMaxH3ConditioningTimelineIntegration:
         # origin bug (bug 1+2, see module docstring), or any mid-clip keyframe
         # (native only knows first/last). References no longer anchor, so
         # that's no longer a trigger condition here.
-        if (has_keyframe and has_reference) or has_mid_keyframe:
+        needs_layout_patch = (has_keyframe and has_reference) or has_mid_keyframe
+        # Per-item noise_aug needs to apply to a pure-keyframe or
+        # pure-reference generation too, not just combined ones -- separate
+        # trigger from the layout patch above.
+        needs_noise_aug_patch = has_keyframe or has_reference
+        if needs_layout_patch or needs_noise_aug_patch:
             model = model.clone()
-            model.add_object_patch(
-                "extra_conds",
-                _make_fixed_extra_conds(
-                    model.model, timeline.pretimeline_gap_seconds, timeline.spatial_collision_offset,
-                    timeline.anchor_decouple_scale_seconds,
-                ),
-            )
+            original_model = model.model
+            if needs_layout_patch:
+                model.add_object_patch(
+                    "extra_conds",
+                    _make_fixed_extra_conds(
+                        original_model, timeline.pretimeline_gap_seconds, timeline.spatial_collision_offset,
+                        timeline.anchor_decouple_scale_seconds,
+                    ),
+                )
+            if needs_noise_aug_patch:
+                # add_object_patch supports dotted paths (comfy.utils.set_attr/
+                # resolve_attr), so this reaches the DiT instance nested inside
+                # the model directly.
+                original_diffusion_model = original_model.diffusion_model
+                model.add_object_patch("diffusion_model._cond_video_rows", _make_fixed_cond_video_rows(original_diffusion_model))
+                model.add_object_patch("diffusion_model._cond_audio_rows", _make_fixed_cond_audio_rows(original_diffusion_model))
 
         return (model, conditioning, latent, float(fps))
 
