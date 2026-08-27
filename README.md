@@ -1,4 +1,4 @@
-# ComfyUI-MiniMaxH3-Easy
+# ComfyUI-MiniMaxH3-Timeline
 
 A timeline-based editor for MiniMax H3 in ComfyUI that goes past what
 either native mode (fl2va keyframes, ref2va references) supports alone:
@@ -232,7 +232,7 @@ Clone (or copy) this repo into your ComfyUI `custom_nodes` directory:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/lukedude06/ComfyUI-MiniMaxH3-Easy.git
+git clone https://github.com/lukedude06/ComfyUI-MiniMaxH3-Timeline.git
 ```
 
 Restart ComfyUI. `MiniMax H3 Timeline Editor` and `MiniMax H3 Conditioning

@@ -1,14 +1,14 @@
 [project]
-name = "comfyui-minimaxh3-easy"
+name = "comfyui-minimaxh3-timeline"
 description = "Combined keyframe + reference conditioning for MiniMax H3 in ComfyUI, in one timeline."
 version = "0.1.0"
 license = { file = "LICENSE" }
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/lukedude06/ComfyUI-MiniMaxH3-Easy"
+Repository = "https://github.com/lukedude06/ComfyUI-MiniMaxH3-Timeline"
 
 [tool.comfy]
 PublisherId = "lukedude06"
-DisplayName = "ComfyUI-MiniMaxH3-Easy"
+DisplayName = "ComfyUI-MiniMaxH3-Timeline"
 Icon = ""

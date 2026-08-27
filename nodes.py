@@ -286,7 +286,7 @@ class MiniMaxH3TimelineEditor:
     (web/minimax_h3_timeline_ui.js) renders and edits it as upload cards and
     this node's job is purely to parse it into a MiniMaxH3TimelineBundle."""
 
-    CATEGORY = "MiniMax H3 Easy/Timeline"
+    CATEGORY = "MiniMax H3 Timeline"
     FUNCTION = "build_timeline"
     RETURN_TYPES = ("MINIMAX_H3_TIMELINE",)
     RETURN_NAMES = ("timeline",)
@@ -1042,8 +1042,8 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
     keyframe_mids = [i for i in items if i.role == KEYFRAME_MID]
     reference_items = [i for i in items if i.role == REFERENCE]
 
-    latent, frame_count = h3._empty_av_latent(width, height, length)
     target_audio_t = h3.temporal_shape(length)[2]
+    latent, frame_count = h3._empty_av_latent(width, height, length)
 
     # --- keyframes (adapted from _empty_image_conditioning) ---
     # Video keyframes -- verified working via real generation tests
@@ -1298,7 +1298,7 @@ class MiniMaxH3ConditioningTimelineIntegration:
     which used to exist purely as a passthrough and just added an unneeded
     dependency for anyone whose graph already wires VAE elsewhere."""
 
-    CATEGORY = "MiniMax H3 Easy/Timeline"
+    CATEGORY = "MiniMax H3 Timeline"
     FUNCTION = "generate"
     RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "FLOAT")
     RETURN_NAMES = ("model", "positive", "latent", "fps")
