@@ -58,6 +58,8 @@ import comfy.conds
 import comfy.ldm.minimax.model as h3model
 import comfy.model_base
 import comfy.model_management
+import comfy.sd
+import comfy.utils
 from comfy_api.latest import InputImpl
 from comfy_extras import nodes_minimax_h3 as h3
 from comfy_extras.nodes_audio import load as _load_audio_waveform
@@ -1388,11 +1390,152 @@ class MiniMaxH3ConditioningTimelineIntegration:
         return (model, conditioning, latent, float(fps))
 
 
+class MiniMaxH3TextEncoderLoader:
+    """Loads a MiniMax H3 text encoder checkpoint the same way native "Load
+    CLIP" (type=minimax) does, but exposes two things that node doesn't:
+
+    1. config_overrides -- a JSON object threaded straight into a real
+       override hook that already exists in ComfyUI core
+       (model_options["qwen3vl_32b_model_config"], read in
+       comfy/sd1_clip.py's SDClipModel.__init__ and merged into the config
+       dataclass the text-encoder model is built from -- see
+       comfy/text_encoders/llama.py's Qwen3VL_32BConfig). This isn't a new
+       mechanism; it's exposing one that already exists in core but that no
+       stock node UI surfaces, so it was previously reachable only by
+       editing comfy/text_encoders/llama.py directly.
+
+    2. A pre-flight check that reads the checkpoint's own tensor shapes
+       (embed_tokens.weight for vocab_size/hidden_size, the highest
+       "model.layers.N." index present for layer count, layer 0's
+       mlp.gate_proj.weight for intermediate_size) and compares them
+       against ComfyUI's one hardcoded MiniMax H3 default
+       (Qwen3VL_32BConfig: hidden_size=5120, num_hidden_layers=50,
+       intermediate_size=25600 -- ComfyUI's own comment on that class notes
+       this is "truncated to the first 50 of 64 layers"). If the checkpoint
+       being loaded doesn't match that shape and no override was given,
+       this raises an error naming exactly which fields differ and the
+       JSON to paste into config_overrides -- instead of either silently
+       loading only the first 50 layers of a larger checkpoint (no error at
+       all, wrong output) or crashing deep inside a weight-copy with a
+       shape-mismatch message that names a tensor, not a fix.
+
+    This does not make an architecturally different text encoder work --
+    only Qwen3-VL-32B-based checkpoints shaped differently than ComfyUI's
+    one hardcoded default (e.g. MiniMax's own un-truncated release, or a
+    fine-tune with a different layer count/hidden size)."""
+
+    CATEGORY = "MiniMax H3 Timeline"
+    FUNCTION = "load"
+    RETURN_TYPES = ("CLIP",)
+    DESCRIPTION = ("Loads a MiniMax H3 (Qwen3-VL-32B) text encoder checkpoint with an "
+                   "optional JSON config_overrides for checkpoints shaped differently than "
+                   "ComfyUI's built-in default (e.g. an un-truncated official release, or a "
+                   "fine-tune with a different layer count/hidden size). Detects the real "
+                   "shape from the checkpoint's own tensors and tells you what to override "
+                   "if it doesn't match what would otherwise be silently assumed.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip_name": (folder_paths.get_filename_list("text_encoders"),),
+            },
+            "optional": {
+                "config_overrides": ("STRING", {
+                    "multiline": True, "default": "",
+                    "tooltip": "JSON object of Qwen3VL_32BConfig field overrides, e.g. "
+                               '{"num_hidden_layers": 64, "hidden_size": 5120}. Leave empty '
+                               "to use ComfyUI's built-in default (50-layer truncated config). "
+                               "Only used if the pre-flight check finds/needs an override -- "
+                               "if it detects a mismatch with this left empty, the error message "
+                               "gives you the exact JSON to paste here.",
+                }),
+                "device": (["default", "cpu"], {"advanced": True}),
+            },
+        }
+
+    @staticmethod
+    def _detected_shape(sd):
+        """Reads architecture-relevant dims straight out of the checkpoint's
+        own tensors. Returns a dict of {config_field: detected_value},
+        omitting fields whose defining tensor isn't present."""
+        detected = {}
+
+        layer_idxs = [int(m.group(1)) for key in sd
+                      for m in [re.match(r"^model\.layers\.(\d+)\.", key)] if m]
+        if layer_idxs:
+            detected["num_hidden_layers"] = max(layer_idxs) + 1
+
+        embed = sd.get("model.embed_tokens.weight")
+        if embed is not None:
+            detected["vocab_size"] = embed.shape[0]
+            detected["hidden_size"] = embed.shape[1]
+
+        gate = sd.get("model.layers.0.mlp.gate_proj.weight")
+        if gate is not None:
+            detected["intermediate_size"] = gate.shape[0]
+
+        return detected
+
+    def load(self, clip_name, config_overrides="", device="default"):
+        overrides = {}
+        if config_overrides and config_overrides.strip():
+            try:
+                overrides = json.loads(config_overrides)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"config_overrides is not valid JSON: {e}") from e
+            if not isinstance(overrides, dict):
+                raise ValueError('config_overrides must be a JSON object, e.g. {"num_hidden_layers": 64}')
+
+        clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
+        sd, _metadata = comfy.utils.load_torch_file(clip_path, safe_load=True, return_metadata=True)
+
+        # This shape check only applies to the MiniMax H3 architecture --
+        # detect via the same key comfy.sd.detect_te_model() checks for it,
+        # so an unrelated checkpoint just proceeds to native loading (and
+        # native loading's own, clearer error if it's the wrong type entirely).
+        is_minimax_arch = ("visual.deepstack_merger_list.0.norm.weight" in sd
+                            and "model.layers.49.self_attn.q_proj.weight" in sd)
+        if is_minimax_arch:
+            detected = self._detected_shape(sd)
+            defaults = {"num_hidden_layers": 50, "hidden_size": 5120,
+                        "vocab_size": 151936, "intermediate_size": 25600}
+            mismatches = {}
+            for field, det_val in detected.items():
+                effective = overrides.get(field, defaults[field])
+                if det_val != effective:
+                    mismatches[field] = det_val
+            if mismatches:
+                raise ValueError(
+                    "This checkpoint's actual shape doesn't match the config it would load "
+                    f"with. Detected directly from its own tensors: {mismatches}. "
+                    "ComfyUI's built-in MiniMax H3 default assumes "
+                    f"{ {k: defaults[k] for k in mismatches} } (a checkpoint truncated to 50 "
+                    "of 64 layers -- see comfy/text_encoders/llama.py's Qwen3VL_32BConfig). "
+                    "Paste this into config_overrides to load it as its actual shape instead: "
+                    + json.dumps(mismatches)
+                )
+
+        model_options = {}
+        if device == "cpu":
+            model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+        if overrides:
+            model_options["qwen3vl_32b_model_config"] = overrides
+
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            [sd], embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            clip_type=comfy.sd.CLIPType.MINIMAX, model_options=model_options,
+        )
+        return (clip,)
+
+
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3TimelineEditor": MiniMaxH3TimelineEditor,
     "MiniMaxH3ConditioningTimelineIntegration": MiniMaxH3ConditioningTimelineIntegration,
+    "MiniMaxH3TextEncoderLoader": MiniMaxH3TextEncoderLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3TimelineEditor": "MiniMax H3 Timeline Editor",
     "MiniMaxH3ConditioningTimelineIntegration": "MiniMax H3 Conditioning (Timeline Integration)",
+    "MiniMaxH3TextEncoderLoader": "MiniMax H3 Text Encoder Loader (config override)",
 }

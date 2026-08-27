@@ -155,6 +155,25 @@ keyframe is already pinned to an exact position in the sequence, so there's
 nothing to tag. You describe what happens at a keyframe in plain prose
 (inside its `[Shot N]`), not by naming it.
 
+### MiniMax H3 Text Encoder Loader (config override)
+
+Drop-in replacement for native `Load CLIP` (`type=minimax`) that also
+accepts a `config_overrides` JSON box. ComfyUI's built-in MiniMax H3 support
+always assumes one fixed text-encoder shape -- a Qwen3-VL-32B checkpoint
+truncated to 50 of its original 64 layers -- with no check that whatever
+you actually load matches that. This node reads the checkpoint's own
+tensors (layer count, hidden size, vocab size, intermediate size) before
+loading and, if they don't match ComfyUI's hardcoded default, stops with
+the exact JSON to paste into `config_overrides` instead of either silently
+loading only the first 50 layers with no error, or crashing on a tensor
+shape mismatch with no indication of what to change.
+
+Use this if you want to load MiniMax H3's own un-truncated encoder release,
+or a fine-tune of the same base with a different layer count/hidden size --
+not for a genuinely different text-encoder architecture, which won't reach
+this check at all (or will load "successfully" with meaningless output if
+its key names happen to coincidentally match).
+
 ## Tips
 
 Patterns found through actual testing, not assumed -- added to as more come up.
