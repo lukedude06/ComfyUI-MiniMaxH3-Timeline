@@ -56,14 +56,26 @@ import torchaudio
 import node_helpers
 import nodes
 import comfy.conds
-import comfy.ldm.minimax.model as h3model
 import comfy.model_base
 import comfy.model_management
 import comfy.sd
 import comfy.utils
 from comfy_api.latest import InputImpl
-from comfy_extras import nodes_minimax_h3 as h3
 from comfy_extras.nodes_audio import load as _load_audio_waveform
+
+# The MiniMax H3 packed-sequence math this pack patches (PackedLayout, the
+# position grids, patchify/pack, the RoPE table, the cond-noise-aug constants)
+# is used from a PINNED vendored snapshot so a ComfyUI update cannot silently
+# change it under the timeline logic. Fall back to the live modules if the
+# snapshot ever fails to import against a future core.
+try:
+    from ._vendor import mmx_model as h3model
+    from ._vendor import mmx_extras as h3
+    _MMX_VENDORED = True
+except Exception:  # pragma: no cover - defensive fallback
+    import comfy.ldm.minimax.model as h3model  # type: ignore
+    from comfy_extras import nodes_minimax_h3 as h3  # type: ignore
+    _MMX_VENDORED = False
 
 # --- canvas / reference sizing -----------------------------------------
 
@@ -777,6 +789,34 @@ def _final_layer_takes_sample_args(final_layer):
     return result
 
 
+# Attributes/methods the vendored _forward / _cond_*_rows / extra_conds patches
+# read off the LIVE (ComfyUI-built) diffusion-model instance. These are
+# checkpoint-frozen, so drift is rare -- but if a ComfyUI refactor renames or
+# drops one, apply nothing and say so loudly instead of producing wrong output.
+_REQUIRED_DIT_ATTRS = (
+    "patch_size", "latents_dim", "hidden_size",
+    "sigma_shift_video", "sigma_shift_audio", "use_adaln_curves",
+    "video_patch_proj", "audio_patch_proj", "condition_proj", "token_refiner",
+    "blocks", "final_layer", "rope_freqs",
+    "_cond_video_rows", "_cond_audio_rows", "_forward",
+)
+
+
+def _dit_compatibility_report(model_patcher):
+    """('' if the live DiT instance exposes everything the timeline patches
+    need, else a human-readable list of what's missing)."""
+    diffusion_model = getattr(getattr(model_patcher, "model", None), "diffusion_model", None)
+    if diffusion_model is None:
+        return "diffusion_model (not a MiniMax H3 model?)"
+    missing = [a for a in _REQUIRED_DIT_ATTRS if not hasattr(diffusion_model, a)]
+    if not diffusion_model.__dict__.get("use_adaln_curves", getattr(diffusion_model, "use_adaln_curves", None)):
+        if not hasattr(diffusion_model, "time_embedder"):
+            missing.append("time_embedder")
+    elif not hasattr(diffusion_model, "adaln_t_table"):
+        missing.append("adaln_t_table")
+    return ", ".join(missing)
+
+
 def _make_fixed_forward(original_diffusion_model):
     """Replacement for the DiT's own _forward (comfy/ldm/minimax/model.py)
     that makes the seg_t "apparent denoising timestep" per-ROW instead of
@@ -1407,6 +1447,18 @@ class MiniMaxH3ConditioningTimelineIntegration:
         # otherwise silently fall back to the global scalar for every row,
         # with no per-item control despite the card UI showing one.
         needs_noise_aug_patch = has_keyframe or has_reference
+        if needs_noise_aug_patch:
+            _incompat = _dit_compatibility_report(model)
+            if _incompat:
+                print(
+                    "[MiniMaxH3-Timeline] This ComfyUI build's MiniMax H3 model is "
+                    f"missing {_incompat!r}, which the timeline patches rely on. "
+                    "Applying NOTHING (the Timeline Editor's keyframes/references "
+                    "still run through native MiniMax H3, minus the per-item "
+                    "noise_aug and the keyframe/reference origin fixes). Pin "
+                    "ComfyUI to a tested version or update this pack."
+                )
+                needs_noise_aug_patch = False
         if needs_noise_aug_patch:
             model = model.clone()
             original_model = model.model
