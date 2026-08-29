@@ -1,4 +1,4 @@
-from .nodes_timeline import (
+from .nodes import (
     MiniMaxH3ConditioningTimelineIntegration,
     MiniMaxH3TextEncoderLoader,
     MiniMaxH3TimelineEditor,

@@ -42,6 +42,7 @@ literally the frame it renders as), not the reference-only experiment.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import re
@@ -749,6 +750,33 @@ def _make_fixed_cond_audio_rows(original_diffusion_model):
     return fixed_cond_audio_rows
 
 
+def _final_layer_takes_sample_args(final_layer):
+    """True if the installed FinalLayer.forward wants the post-v0.34.2
+    (sigma, sample_sigmas, shifts) trailing args. Result cached on the class.
+    Falls back to a positional-count check if the signature cannot be read."""
+    cls = type(final_layer)
+    cached = getattr(cls, "_mmx_timeline_fl_extra", None)
+    if cached is not None:
+        return cached
+    result = False
+    try:
+        params = inspect.signature(cls.forward).parameters
+        if {"sigma", "sample_sigmas", "shifts"} & set(params):
+            result = True
+        elif not any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values()):
+            positional = [p for p in params.values()
+                          if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                        inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+            result = len(positional) > 5  # self, x, t_emb, video_seg, audio_seg
+    except (TypeError, ValueError):
+        result = False
+    try:
+        cls._mmx_timeline_fl_extra = result
+    except Exception:
+        pass
+    return result
+
+
 def _make_fixed_forward(original_diffusion_model):
     """Replacement for the DiT's own _forward (comfy/ldm/minimax/model.py)
     that makes the seg_t "apparent denoising timestep" per-ROW instead of
@@ -767,7 +795,11 @@ def _make_fixed_forward(original_diffusion_model):
     lookup, RoPE, the block loop, final_layer) is untouched. Duplicating
     this much of the forward pass is a real, accepted maintenance cost:
     it will silently drift from any future upstream change to _forward
-    until this file is updated to match. Captures original_diffusion_model
+    until this file is updated to match. Where a drift has a stable,
+    detectable shape it is adapted at runtime instead -- e.g. the
+    final_layer call below, whose signature changed after ComfyUI
+    v0.34.2 (see _final_layer_takes_sample_args). Captures
+    original_diffusion_model
     in closure since add_object_patch stores this as a plain instance
     attribute, not a bound method -- called as self._forward(...) would
     NOT auto-bind self the way a class-level method does."""
@@ -919,7 +951,17 @@ def _make_fixed_forward(original_diffusion_model):
 
         video_seg = next((a, b, t_row[t_v]) for a, b, k in layout.segments if k == "video")
         audio_seg = next((a, b, t_row[t_a]) for a, b, k in layout.segments if k == "audio")
-        v, a = m.final_layer(h, t_emb, video_seg, audio_seg)
+        # final_layer.forward gained (sigma, sample_sigmas, shifts) after
+        # ComfyUI v0.34.2 (PDD-head banking). Adapt to whichever signature is
+        # installed so this pack keeps working across ComfyUI versions -- every
+        # value it wants is already computed above.
+        if _final_layer_takes_sample_args(m.final_layer):
+            v, a = m.final_layer(h, t_emb, video_seg, audio_seg,
+                                 sigma_v,
+                                 transformer_options.get("sample_sigmas"),
+                                 (shift_v, shift_a))
+        else:
+            v, a = m.final_layer(h, t_emb, video_seg, audio_seg)
 
         video_out = h3model.unpatchify_video(v, latent_t, lat_h // 2, lat_w // 2, m.latents_dim, m.patch_size)
         video_out = video_out[:, :, :orig_t, :orig_h, :orig_w]
