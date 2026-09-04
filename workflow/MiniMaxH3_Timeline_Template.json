@@ -705,11 +705,6 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "model",
-          "type": "MODEL",
-          "link": 33
-        },
-        {
           "name": "clip",
           "type": "CLIP",
           "link": 39
@@ -732,25 +727,20 @@
       ],
       "outputs": [
         {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            34
-          ]
-        },
-        {
           "name": "positive",
           "type": "CONDITIONING",
           "links": [
             37
-          ]
+          ],
+          "slotIndex": 0
         },
         {
           "name": "latent",
           "type": "LATENT",
           "links": [
             38
-          ]
+          ],
+          "slotIndex": 1
         },
         {
           "name": "fps",
@@ -758,7 +748,8 @@
           "links": [
             43,
             46
-          ]
+          ],
+          "slotIndex": 2
         }
       ],
       "properties": {
@@ -844,6 +835,46 @@
         "fps": 30,
         "bit_depth": 8
       }
+    },
+    {
+      "id": 29,
+      "type": "MiniMaxH3TimelineModelPatch",
+      "pos": [
+        -1161.5067381636482,
+        -1184.508049853526
+      ],
+      "size": [
+        340,
+        106
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 33
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            34
+          ],
+          "slotIndex": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3TimelineModelPatch"
+      },
+      "widgets_values": [
+        1.0,
+        64.0,
+        2.0
+      ]
     }
   ],
   "links": [
@@ -947,13 +978,13 @@
       33,
       20,
       0,
-      26,
+      29,
       0,
       "MODEL"
     ],
     [
       34,
-      26,
+      29,
       0,
       7,
       0,
@@ -964,7 +995,7 @@
       22,
       0,
       26,
-      2,
+      1,
       "VAE"
     ],
     [
@@ -972,13 +1003,13 @@
       23,
       0,
       26,
-      3,
+      2,
       "VAE"
     ],
     [
       37,
       26,
-      1,
+      0,
       12,
       1,
       "CONDITIONING"
@@ -986,7 +1017,7 @@
     [
       38,
       26,
-      2,
+      1,
       13,
       4,
       "LATENT"
@@ -996,7 +1027,7 @@
       21,
       0,
       26,
-      1,
+      0,
       "CLIP"
     ],
     [
@@ -1004,13 +1035,13 @@
       28,
       0,
       26,
-      4,
+      3,
       "MINIMAX_H3_TIMELINE"
     ],
     [
       43,
       26,
-      3,
+      2,
       11,
       1,
       "FLOAT"
@@ -1034,7 +1065,7 @@
     [
       46,
       26,
-      3,
+      2,
       16,
       2,
       "FLOAT"

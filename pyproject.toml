@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-minimaxh3-timeline"
 description = "Combined keyframe + reference conditioning for MiniMax H3 in ComfyUI, in one timeline."
-version = "0.1.0"
+version = "0.2.0"
 license = { file = "LICENSE" }
 dependencies = []
 

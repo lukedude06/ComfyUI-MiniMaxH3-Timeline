@@ -19,7 +19,7 @@ const TIMELINE_CLASS = "MiniMaxH3TimelineEditor";
 const INTEGRATION_CLASS = "MiniMaxH3ConditioningTimelineIntegration";
 // No architectural limit on item count -- PackedLayout just adds more rows
 // to the packed self-attention sequence per item. 40 is a practical ceiling
-// well past what VRAM/sampling time makes usable, matching nodes_timeline.py's
+// well past what VRAM/sampling time makes usable, matching nodes.py's
 // own MAX_MEDIA.
 const MAX_ITEMS = 40;
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "tif", "tiff"]);
@@ -104,7 +104,7 @@ function defaultItem() {
     // anchor_seconds is keyframe_mid-only now (its real placement frame).
     // References had their own anchor_channel/anchor_closeness controls;
     // removed after testing showed they weren't needed for co-presence --
-    // see nodes_timeline.py's module docstring.
+    // see nodes.py's module docstring.
     // noise_aug: real per-item control (unlike the removed anchor system) --
     // patches the DiT's own _cond_video_rows/_cond_audio_rows so each row's
     // value is genuinely independent, not just a global scalar. Default
@@ -236,7 +236,7 @@ function installTimelineUI(node) {
             // to have their own anchor/channel/closeness controls here;
             // removed after testing showed plain unanchored references
             // already produce clean multi-reference co-presence on their own
-            // (see nodes_timeline.py's module docstring) -- nothing left for
+            // (see nodes.py's module docstring) -- nothing left for
             // a reference card to control beyond role and the file itself.
             if (item.role === ROLE_MID) {
                 appendSecondsRow(card, item, "at:", "anchor_seconds", commit);
@@ -249,7 +249,7 @@ function installTimelineUI(node) {
             // noise before the model sees it, at the cost of matching it
             // less exactly. Does NOT fix a hard cut into a mid-clip
             // keyframe -- that's a duration_seconds problem, confirmed by
-            // direct testing (see README Tips) after this was originally,
+            // direct testing after this was originally,
             // wrongly, assumed to be the fix.
             const augRow = document.createElement("div");
             augRow.className = "h3c-seconds";
@@ -378,7 +378,7 @@ app.registerExtension({
 //
 // Reads the connected MiniMaxH3TimelineEditor node's media_json widget
 // directly and computes the exact same <Picture N>/<Video N>/<Audio N>
-// ordinals nodes_timeline.py's _combined_conditioning assigns (role ==
+// ordinals nodes.py's _combined_conditioning assigns (role ==
 // "reference" items, in array order, bucketed by media type, numbered
 // 1-based per bucket) -- so the tag you pick here is guaranteed to be the
 // tag the model actually receives, not a guess.
