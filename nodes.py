@@ -1,50 +1,36 @@
 """MiniMax H3 Timeline Editor + combined keyframe/reference conditioning.
 
-Two verified native-ComfyUI bugs prevent keyframe conditioning (fl2va-style
-first/last frame) and reference conditioning (ref2va-style @-tagged media)
-from being used in the same generation. Both were independently confirmed
-against the currently-installed source in this project, not inherited from
-any prior analysis:
+Nodes:
+  MiniMaxH3TimelineEditor                   cards -> a timeline bundle
+  MiniMaxH3ConditioningTimelineIntegration  bundle -> conditioning + latent + fps
+  MiniMaxH3TimelineModelPatch               MODEL -> patched MODEL
+  MiniMaxH3TextEncoderLoader                Load CLIP with a config override
 
-  1. comfy/model_base.py's MiniMaxH3.extra_conds builds cond_video_latents
-     from keyframes, then unconditionally overwrites it with the refs list
-     instead of concatenating -- with both present, keyframe latents never
-     reach the model.
-  2. comfy/ldm/minimax/model.py's PackedLayout anchors a "first" keyframe's
-     rotary time to the raw text length, correct only when nothing precedes
-     the video segment. Each reference pushes the video's real start later,
-     so with references present the keyframe ends up anchored before the
-     video actually begins.
+THE ORDERING CONTRACT -- the invariant everything else rests on. Three
+structures must stay in lockstep, all of them keyframes-then-references:
 
-This module fixes both by patching the loaded model's extra_conds (the
-standard `model.clone().add_object_patch(...)` mechanism, not a core-file
-edit) with a corrected version: concatenates both latent lists, and anchors
-keyframes against the real post-reference video origin.
+  1. cond_video_latents / cond_audio_latents and their parallel
+     cond_video_noise_augs / cond_audio_noise_augs, built in fixed_extra_conds
+  2. the cond / cond_audio / ref_img / ref_audio segments emitted by
+     _corrected_packed_layout
+  3. the order those aug lists are consumed in fixed_forward
 
-REMOVED, deliberately, after extensive same-seed A/B testing: a whole
-per-reference anchoring/"channel" system (anchor_seconds/anchor_channel,
-anchor_closeness, anchor_decouple_scale_seconds, spatial_collision_offset)
-used to exist here, built on the hypothesis that references needed to be
-manually pulled toward a shared position to co-occur in one scene. Testing
-disproved the premise: plain unanchored multi-reference conditioning (with
-just the two bugs above fixed) produced clean co-presence on its own, no
-different in quality from any anchored configuration tested. The anchoring
-system's real, confirmed effects -- same-position binding vs. drift-apart
-segregation, a hard bleed artifact near the clip's tail -- were all real,
-just never actually necessary to solve the problem it was built for. Kept
-out rather than left in as an unused/misleading knob. See git history for
-the removed implementation if a real need for deliberate multi-scene
-staging (references drifting into separate moments) comes up later.
+Nothing validates this. Desynchronise any one of them and rows silently take
+another row's content or apparent timestep, with no error.
 
-Mid-clip keyframes (role keyframe_mid) are unaffected by that removal --
-a keyframe's own placement is a real, load-bearing seconds value (it's
-literally the frame it renders as), not the reference-only experiment.
+The patches are installed via model.clone().add_object_patch(...) and are
+stored as plain instance attributes, not bound methods -- so each factory
+captures the model it was built for, because `self` is not supplied at call
+time. They have no static callers in this file by design; ComfyUI invokes
+them on the patched model during sampling.
 """
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from typing import Mapping
@@ -56,8 +42,14 @@ import torchaudio
 import node_helpers
 import nodes
 import comfy.conds
+# common_dit / model_prefetch are used inside the patched _forward. They used to
+# resolve only because ComfyUI core happens to import them first; import them
+# here so this file does not depend on someone else's import order.
+import comfy.ldm.common_dit
 import comfy.model_base
 import comfy.model_management
+import comfy.model_prefetch
+import comfy.nested_tensor
 import comfy.sd
 import comfy.utils
 from comfy_api.latest import InputImpl
@@ -268,21 +260,10 @@ class MiniMaxH3TimelineBundle:
     pretimeline_gap_seconds: float = 1.0
     spatial_collision_offset: float = 64.0
     anchor_decouple_scale_seconds: float = 2.0
-    # Native MiniMax H3 parameters (see INPUT_TYPES). Native code reads these
-    # as a single GLOBAL scalar applied uniformly to every keyframe/reference
-    # row of a kind; this project now gives each item its OWN value instead
-    # (see _TimelineItem.noise_aug, _make_fixed_cond_video_rows/_cond_audio_
-    # rows, _make_fixed_forward) so these two fields are effectively dead in
-    # normal use -- build_timeline always resolves a per-item default for
-    # every card (0.999 visual / 1.0 audio if the card never touched it), so
-    # the per-item list passed to the patches is always fully populated and
-    # these globals are never actually read as a fallback. Kept only as the
-    # payload's true global fallback for the theoretical case of an item
-    # with no noise_aug field at all (shouldn't happen through this UI).
-    #
-    # Testing found this does NOT fix a hard cut into a mid-clip keyframe --
-    # that's a duration problem (not enough frames to transition through),
-    # not a noise_aug problem. See README Tips.
+    # Global fallbacks. build_timeline resolves a per-item noise_aug for every
+    # card, so the parallel lists handed to the patches are always fully
+    # populated and these are never read in normal use. Kept for an item that
+    # carries no noise_aug field at all.
     visual_cond_noise_aug: float = 0.999
     audio_cond_noise_aug: float = 1.0
 
@@ -313,17 +294,10 @@ class MiniMaxH3TimelineEditor:
             "required": {
                 "duration_seconds": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 15.0, "step": 0.1}),
                 # These two globals are effectively dead in normal use --
-                # every card in the Timeline Editor always supplies its own
-                # per-item noise_aug (see _TimelineItem.noise_aug), so these
-                # never actually get read as a fallback. Kept only for the
-                # payload's true global-fallback case (an item with no
-                # noise_aug field at all, which shouldn't happen through this
-                # UI). 0.999 is the native per-modality default: how much a
-                # row is trusted/how noise-free it's treated as from the
-                # first sampling step. Does NOT fix a hard cut into a
-                # mid-clip keyframe -- that's a duration problem (see README
-                # Tips), confirmed by direct testing after this was
-                # originally (and wrongly) assumed to be the fix.
+                # every card supplies its own per-item noise_aug, so these are
+                # only a fallback for an item with no noise_aug field at all.
+                # 0.999 / 1.0 are the per-modality defaults: how resolved a row
+                # is treated as from the first sampling step.
                 "visual_cond_noise_aug": ("FLOAT", {"default": 0.999, "min": 0.0, "max": 1.0, "step": 0.001}),
                 # Same mechanism, for reference AUDIO rows specifically.
                 "audio_cond_noise_aug": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
@@ -403,94 +377,28 @@ def _frame_index_to_token_index(pixel_frame_index):
 def _corrected_packed_layout(text_len, latent_t, latent_h, latent_w, audio_t, keyframes=None, refs=None,
                               frame_count=None, audio_keyframes=None, pretimeline_gap=None,
                               spatial_collision_offset=64.0, anchor_decouple_scale=None):
-    """Same construction as comfy.ldm.minimax.model.PackedLayout, reusing its
-    own helper functions so this stays in lockstep with core's math -- with
-    three changes, all real experiments with no verified-correct behavior to
-    compare against, since neither checkpoint was trained on this
-    combination and there's no reference implementation:
+    """PackedLayout built for what the timeline needs to express.
 
-      1. THE FIX for the keyframe/reference time-origin bug: a keyframe's
-         rotary anchor is computed against the REAL video origin (text_len
-         plus however far the reference loop's cursor advanced, plus
-         pretimeline_gap), not the raw text length.
-      2. Mid-clip keyframes: resolved_frame_index is no longer restricted to
-         0/frame_count-1 -- any pixel index maps to its real
-         compression-token time (see _frame_index_to_token_index).
-      3. Per-reference anchoring: an image/audio/video reference block may
-         carry "anchor_frame_index" (+ "anchor_closeness") to pull its
-         rotary time toward a specific point in the target video's timeline
-         instead of the generic sequential pre-timeline slot every reference
-         otherwise gets -- this is the mechanism for making two references
-         genuinely co-occur with the same moment instead of just each
-         independently "existing somewhere" in the clip. Two anchored refs
-         resolving to the exact same time get separated on the spatial
-         (h, w) axes by spatial_collision_offset instead of colliding.
+    Emits, in physical order: text, keyframe cond rows, audio-keyframe
+    cond_audio rows, reference rows, target audio, target video.
 
-         IMPORTANT, per direct testing: "anchor" here is architecturally a
-         RoPE relative-distance ATTENTION BIAS, not a hard scheduling gate --
-         generation is one joint non-sequential denoise over the whole clip,
-         not frame by frame, so there's no mechanism that could make an
-         identity appear ONLY at/after its anchor time, and in practice a
-         reference anchored at 2s was observed already present (entering
-         frame) well before that, around 0.8s. That said, don't undersell it
-         either: the same test showed real, visible build-up in that
-         identity's presence/prominence culminating near the anchor time --
-         a soft attention bias can still produce a genuine visible timing
-         effect, it's just not a precise "appears at exactly N seconds"
-         placement. Net: treat anchor_seconds as "roughly biases where in the
-         clip this reference is strongest," not as a precise appearance-time
-         control and not as having no visible timing effect either -- both
-         overclaims are wrong. The precise shape of that bias (how early
-         presence starts ramping up, how sharply it concentrates) is not
-         yet characterized; a same-seed anchor-near-start vs anchor-near-end
-         comparison would pin it down further.
+    Reference segments are buffered before anything is placed, so the cursor's
+    final position is known up front; video_origin is that cursor plus
+    pretimeline_gap, and keyframe anchors are computed against video_origin.
+    A keyframe's rotary time is the real time of the compression token
+    containing its frame (see _frame_index_to_token_index), not a linear
+    frame offset.
 
-    CLOSENESS BUG, found via that comparison and fixed here: closeness used
-    to be a FRACTION of the distance from the reference's unanchored position
-    to its anchor target (final_t = unanchored_t + closeness * (exact_t -
-    unanchored_t)). That distance grows with how far into the clip
-    anchor_seconds points, so the exact same closeness value pulled harder
-    (stronger real-video locality, more background-bleed risk) the later
-    anchor_seconds was set to -- confirmed with a same-seed, closeness-held-
-    constant, anchor-only-changed comparison (anchor=4s produced visibly
-    stronger reference-content transfer AND a background/identity bleed
-    artifact that anchor=2s did not, despite identical closeness=0.5).
-    closeness and anchor_seconds were meant to be independent knobs (how
-    strongly vs. where) but were actually entangled. Fixed by making
-    closeness a fraction of a FIXED absolute pull-back distance
-    (anchor_decouple_scale) instead of the variable, target-dependent one --
-    now the same closeness means the same absolute coupling strength
-    regardless of where anchor_seconds points.
+    Handles multi-frame keyframes (latent_t > 1) and the cond_audio segment
+    kind for audio pinned into the target's own audio track.
 
-    THREE REGIMES, confirmed by direct same-seed A/B testing (not just design
-    intent) -- anchor_frame_index ("channel" in the frontend, deliberately
-    not called a timestamp -- see MiniMaxH3TimelineEditor's own docstring)
-    behaves as a channel-select for which references share one scene, not a
-    timing control:
-      - Unanchored (anchor_frame_index absent): the original, proven-clean
-        default reference behavior -- present, but loose/non-dominant.
-      - Two+ references anchored to the SAME target frame: bound together,
-        genuinely co-occur in one shared scene/moment. This is the fix for
-        the original "two references split into separate panels" problem.
-      - Two+ references anchored to DIFFERENT target frames (even both
-        otherwise valid, away from the clip's tail): confirmed to visibly
-        drift apart into their own separate environments/moments instead of
-        sharing a scene -- e.g. one reference's own photo background
-        (a park) versus another's (a city skyscraper backdrop) each surfacing
-        independently. Not yet exploited as a feature, but real: this is a
-        plausible route to deliberately staging two characters in two
-        different moments/scenes within one generation, if the prompt gives
-        each one its own distinct described setting/action to reinforce it
-        (untested pairing of channel-splitting with prompt-per-character
-        specificity).
-    The target frame's own magnitude barely matters within a regime (same-
-    channel stayed stable and clean from ~0.1s to ~4.0s of a 5.167s clip);
-    the one confirmed failure mode is anchoring very close to the clip's true
-    final frame (~4.9s of 5.167s), which bled that reference's own photo
-    background through hard right around that point.
-
-    Bug-for-bug identical to native PackedLayout when refs is empty/None and
-    no anchors are used."""
+    Per-reference anchoring (anchor_frame_index / anchor_closeness,
+    spatial_collision_offset, anchor_decouple_scale) is implemented here but
+    DORMANT: build_timeline forces references to ANCHOR_UNSET, so
+    _anchor_frame_index returns None and these branches never run. Intact
+    rather than deleted -- it re-arms if a reference ever carries a real
+    anchor_seconds again.
+    """
     frame, w_grid = h3model._frame_grid(latent_h, latent_w)
     frame_rows = frame.shape[0]
     target_audio_w = (float(w_grid[0]), float(w_grid[-1]))
@@ -843,7 +751,8 @@ def _make_fixed_forward(original_diffusion_model):
     in closure since add_object_patch stores this as a plain instance
     attribute, not a bound method -- called as self._forward(...) would
     NOT auto-bind self the way a class-level method does."""
-    def fixed_forward(x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
+    def fixed_forward(x, timestep, context, transformer_options={}, minimax_payload=None,
+                      denoise_mask=None, audio_denoise_mask=None, **kwargs):
         m = original_diffusion_model
         video_x, audio_x = x[0], x[1]
         orig_t, orig_h, orig_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
@@ -880,13 +789,45 @@ def _make_fixed_forward(original_diffusion_model):
         default_aud_aug = float(payload.get("audio_cond_noise_aug", h3model.AUDIO_COND_TIMESTEP))
         vis_augs = payload.get("cond_video_noise_augs") or []
         aud_augs = payload.get("cond_audio_noise_augs") or []
+        # DENOISE MASKS -- ported from core's _forward. A masked row runs at
+        # sigma = m * sigma_stream, so its label is 1 - m*sigma, clamped at the
+        # cond timestep for a fully preserved row. Without this the model is
+        # never told a frozen region is already resolved and treats it as noise
+        # at the current sigma, which is exactly the signal any tiled/inpaint
+        # workflow depends on. Kept per-ROW here, same as the aug handling below.
+        t_pin_v = max(t_v, h3model.VISUAL_COND_TIMESTEP)
+        t_pin_a = max(t_a, h3model.AUDIO_COND_TIMESTEP)
+        video_seg_t, audio_seg_t = t_v, t_a
+        video_rows_t = audio_rows_t = None
+        # NB: `m` is the diffusion model in this scope (m = original_diffusion_model
+        # above), unlike core's _forward where it is free -- so the mask locals
+        # are named mask_vals here. Shadowing it breaks every later m.<attr>.
+        if denoise_mask is not None:
+            mask_vals = h3model.mask_row_values(
+                denoise_mask[0, 0].to(torch.float32), latent_t, lat_h, lat_w)
+            if mask_vals is not None:
+                rows_t = (1.0 - mask_vals * sigma_v.to(mask_vals.device)).clamp(max=t_pin_v)
+                if rows_t.unique().numel() == 1:
+                    video_seg_t = float(rows_t[0])
+                else:
+                    video_rows_t = rows_t
+        if audio_denoise_mask is not None:
+            mask_vals = audio_denoise_mask[0, 0].to(torch.float32).reshape(-1)
+            if not bool((mask_vals >= 1.0 - 1e-3).all()):
+                sigma_a = 1.0 - t_a
+                rows_t = (1.0 - mask_vals * sigma_a).clamp(max=t_pin_a)
+                if rows_t.unique().numel() == 1:
+                    audio_seg_t = float(rows_t[0])
+                else:
+                    audio_rows_t = rows_t
+
         vis_idx = aud_idx = 0
         seg_t_list = []
         for a, b, kind in layout.segments:
             if kind == "video":
-                seg_t_list.append(t_v)
+                seg_t_list.append(video_seg_t)
             elif kind == "audio":
-                seg_t_list.append(t_a)
+                seg_t_list.append(audio_seg_t)
             elif kind in ("cond", "ref_img"):
                 aug = float(vis_augs[vis_idx]) if vis_idx < len(vis_augs) else default_vis_aug
                 vis_idx += 1
@@ -904,8 +845,17 @@ def _make_fixed_forward(original_diffusion_model):
                 seg_t_list.append(max(t_a, aug))
             else:  # text
                 seg_t_list.append(t_v)
-        unique_t = sorted(set(seg_t_list) | {t_v, t_a})
+        unique_t = sorted(set(seg_t_list) | {t_v, t_a}
+                          | (set(video_rows_t.unique().tolist()) if video_rows_t is not None else set())
+                          | (set(audio_rows_t.unique().tolist()) if audio_rows_t is not None else set()))
         t_row = {t: i for i, t in enumerate(unique_t)}
+
+        def rows_to_mod_index(rows_t, tag):
+            """per-row timestep values -> per-row mod-row indices into t_emb"""
+            levels = rows_t.unique()
+            base = torch.tensor([t_row[v] * 3 + tag for v in levels.tolist()],
+                                dtype=torch.long, device=rows_t.device)
+            return base[torch.searchsorted(levels, rows_t)]
         seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "ref_audio": 2, "cond_audio": 2}
 
         text_tags = payload.get("text_token_tags")
@@ -919,6 +869,10 @@ def _make_fixed_forward(original_diffusion_model):
                     if i == b - a or tags[i] != tags[run_start]:
                         mod_segments.append((a + run_start, a + i, row_base + int(tags[run_start])))
                         run_start = i
+            elif kind == "video" and video_rows_t is not None:
+                mod_segments.append((a, b, rows_to_mod_index(video_rows_t, seg_tag[kind])))
+            elif kind == "audio" and audio_rows_t is not None:
+                mod_segments.append((a, b, rows_to_mod_index(audio_rows_t, seg_tag[kind])))
             else:
                 mod_segments.append((a, b, row_base + seg_tag[kind]))
 
@@ -989,8 +943,12 @@ def _make_fixed_forward(original_diffusion_model):
         if prefetch_queue is not None:
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
 
-        video_seg = next((a, b, t_row[t_v]) for a, b, k in layout.segments if k == "video")
-        audio_seg = next((a, b, t_row[t_a]) for a, b, k in layout.segments if k == "audio")
+        va, vb, _ = next(sg for sg in layout.segments if sg[2] == "video")
+        aa, ab, _ = next(sg for sg in layout.segments if sg[2] == "audio")
+        video_seg = ((va, vb, rows_to_mod_index(video_rows_t, 0) // 3) if video_rows_t is not None
+                     else (va, vb, t_row[video_seg_t]))
+        audio_seg = ((aa, ab, rows_to_mod_index(audio_rows_t, 0) // 3) if audio_rows_t is not None
+                     else (aa, ab, t_row[audio_seg_t]))
         # final_layer.forward gained (sigma, sample_sigmas, shifts) after
         # ComfyUI v0.34.2 (PDD-head banking). Adapt to whichever signature is
         # installed so this pack keeps working across ComfyUI versions -- every
@@ -1023,6 +981,19 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
     inside this closure) sees them."""
 
     def fixed_extra_conds(**kwargs):
+        # EARLY-OUT: nothing from a Timeline Editor in this conditioning, so
+        # behave exactly like native. Without this, a model patched by the
+        # standalone MiniMaxH3TimelineModelPatch node would shift every plain
+        # t2v/fl2va/ref2va generation by pretimeline_gap, because
+        # _corrected_packed_layout adds that gap unconditionally while native
+        # PackedLayout puts video_origin straight at the post-reference cursor.
+        # Gating here rather than at graph-build time is what makes the patch
+        # node safe to leave permanently in the model chain.
+        if (kwargs.get("minimax_keyframes") is None
+                and kwargs.get("minimax_refs") is None
+                and kwargs.get("minimax_audio_keyframes") is None):
+            return comfy.model_base.MiniMaxH3.extra_conds(original_model, **kwargs)
+
         out = comfy.model_base.BaseModel.extra_conds(original_model, **kwargs)
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
@@ -1085,8 +1056,38 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
             payload["audio_cond_noise_aug"] = kwargs["minimax_audio_cond_noise_aug"]
         payload["seed"] = kwargs.get("seed", 0)
         payload["audio_scale"] = original_model.audio_scale()
+        # Denoise-mask conds, exactly as native MiniMaxH3.extra_conds emits them.
+        # These are what tell the DiT that masked rows are already resolved, so a
+        # frozen region reads as context instead of as noise at the current
+        # sigma. Replacing extra_conds without this silently dropped them for
+        # every masked/inpaint-style sampling run.
+        denoise_mask = kwargs.get("denoise_mask", None)
+        if denoise_mask is not None and hasattr(original_model, "_denoise_mask_conds"):
+            out.update(original_model._denoise_mask_conds(denoise_mask, latent_shapes))
         if cross_attn is not None and latent_shapes is not None and len(latent_shapes) > 1:
             vs = latent_shapes[0]
+            # A keyframe's cond segment is sized from the TARGET's frame grid,
+            # while _cond_video_rows patchifies the keyframe's own latent, so
+            # the two only agree when the keyframe was encoded at the canvas
+            # being sampled. Catch the disagreement here, where the sizes are
+            # still meaningful, instead of letting it surface as a broadcast
+            # error inside the DiT's row assignment.
+            tgt_h, tgt_w = (vs[3] + 1) // 2 * 2, (vs[4] + 1) // 2 * 2
+            for kf in (keyframes or ()):
+                z = kf.get("latent")
+                if z is None:
+                    continue
+                if int(z.shape[-2]) != tgt_h or int(z.shape[-1]) != tgt_w:
+                    raise ValueError(
+                        "MiniMax H3 Timeline: keyframe media was encoded for a "
+                        f"{int(z.shape[-1])}x{int(z.shape[-2])} latent but the latent being "
+                        f"sampled is {tgt_w}x{tgt_h} "
+                        f"({tgt_w * 16}x{tgt_h * 16} px). A keyframe's rows are built on the "
+                        "target's own grid, so the two have to match.\n"
+                        "Connect the latent you are about to sample into the Conditioning "
+                        "node's `latent` input -- it then defines the canvas and the "
+                        "resolution/aspect_ratio widgets are ignored."
+                    )
             # THE FIX for bug 2: our corrected layout builder, not the
             # native PackedLayout, so a keyframe's anchor accounts for
             # however far references push the real video origin.
@@ -1104,6 +1105,97 @@ def _make_fixed_extra_conds(original_model, pretimeline_gap_seconds, spatial_col
     return fixed_extra_conds
 
 
+def _av_streams(latent):
+    """(video, audio) out of an H3 AV latent, validated."""
+    samples = latent.get("samples") if isinstance(latent, Mapping) else None
+    if (samples is None or not getattr(samples, "is_nested", False)
+            or len(getattr(samples, "tensors", ())) != 2):
+        raise ValueError("latent must be a MiniMax H3 AV latent (nested video + audio)")
+    video, audio = samples.tensors[0], samples.tensors[1]
+    if video.ndim != 5 or video.shape[1] != 24:
+        raise ValueError(
+            f"latent's video stream should be [B,24,T,H,W], got {tuple(video.shape)}")
+    return video, audio
+
+
+def _geometry_from_latent(latent):
+    """(width, height, length) of the canvas a latent actually occupies.
+
+    A keyframe's "cond" segment is sized from the TARGET's frame grid in
+    _corrected_packed_layout, while _cond_video_rows patchifies the keyframe's
+    OWN latent. Those two agree only when keyframe media was encoded at the
+    canvas actually being sampled -- so when a latent is supplied, that latent
+    defines the canvas, rather than the resolution/aspect widgets describing
+    one it may not match. The widgets can only name preset canvases anyway;
+    a latent can be any valid size."""
+    video, audio = _av_streams(latent)
+    lh, lw = int(video.shape[3]), int(video.shape[4])
+    if lh % 2 or lw % 2:
+        raise ValueError(
+            f"latent is {lw}x{lh} latent units; both must be EVEN because the DiT "
+            "patchifies 2x2. Use a canvas whose pixel width and height are multiples of 32."
+        )
+    latent_t = int(video.shape[2])
+    if latent_t < 2 or (latent_t - 2) % 5 != 0:
+        raise ValueError(
+            f"latent has latent_t={latent_t}, which is not on MiniMax H3's 5-token/"
+            "17-frame grid (valid: 2, 7, 12, 17, ...) -- something resampled it along "
+            "time without accounting for H3's temporal compression."
+        )
+    length = sum(h3model.FRAME_PER_TOKEN[k % 5] for k in range(latent_t))
+    return lw * 16, lh * 16, length
+
+
+def _apply_timeline_patches(model, pretimeline_gap_seconds, spatial_collision_offset,
+                            anchor_decouple_scale_seconds):
+    """Install the four object patches that make the timeline's semantics
+    expressible, on a CLONE of `model`. Returns (patched_model, report):
+    report is '' on success, or the human-readable list of missing DiT
+    attributes when this ComfyUI build can't support the patches -- in which
+    case NOTHING is applied and the original model comes back untouched.
+
+    Shared by MiniMaxH3TimelineModelPatch (the standalone node) and
+    MiniMaxH3ConditioningTimelineIntegration (the bundled path kept for
+    existing workflows). Lifted verbatim out of the latter -- the patch
+    targets, their order, and the values captured in each closure are
+    unchanged."""
+    incompat = _dit_compatibility_report(model)
+    if incompat:
+        return model, incompat
+
+    model = model.clone()
+    original_model = model.model
+    model.add_object_patch(
+        "extra_conds",
+        _make_fixed_extra_conds(
+            original_model, pretimeline_gap_seconds, spatial_collision_offset,
+            anchor_decouple_scale_seconds,
+        ),
+    )
+    # add_object_patch supports dotted paths (comfy.utils.set_attr/
+    # resolve_attr), so this reaches the DiT instance nested inside
+    # the model directly.
+    original_diffusion_model = original_model.diffusion_model
+    model.add_object_patch("diffusion_model._cond_video_rows", _make_fixed_cond_video_rows(original_diffusion_model))
+    model.add_object_patch("diffusion_model._cond_audio_rows", _make_fixed_cond_audio_rows(original_diffusion_model))
+    # Per-ROW apparent timestep (see _make_fixed_forward's docstring)
+    # -- decouples each row's noise-injection amount (above) from how
+    # "resolved" the model is told that row is, which native ties to
+    # the same single scalar.
+    model.add_object_patch("diffusion_model._forward", _make_fixed_forward(original_diffusion_model))
+    return model, ""
+
+
+_INCOMPAT_MESSAGE = (
+    "[MiniMaxH3-Timeline] This ComfyUI build's MiniMax H3 model is "
+    "missing {!r}, which the timeline patches rely on. "
+    "Applying NOTHING (the Timeline Editor's keyframes/references "
+    "still run through native MiniMax H3, minus the per-item "
+    "noise_aug and the keyframe/reference origin fixes). Pin "
+    "ComfyUI to a tested version or update this pack."
+)
+
+
 def _anchor_frame_index(item: _TimelineItem, frame_count: int) -> int | None:
     if item.anchor_seconds < 0.0:
         return None
@@ -1119,32 +1211,33 @@ def _anchor_audio_frame_index(item: _TimelineItem, audio_t: int) -> int:
     return max(0, min(audio_t - 1, round(max(0.0, item.anchor_seconds) * h3.AUDIO_LATENT_FPS)))
 
 
-def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, length, ref_image_size, timeline: MiniMaxH3TimelineBundle):
+def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, length, ref_image_size,
+                           timeline: MiniMaxH3TimelineBundle, provided_latent=None):
     items = timeline.items
     keyframe_start = next((i for i in items if i.role == KEYFRAME_START), None)
     keyframe_end = next((i for i in items if i.role == KEYFRAME_END), None)
     keyframe_mids = [i for i in items if i.role == KEYFRAME_MID]
     reference_items = [i for i in items if i.role == REFERENCE]
 
-    target_audio_t = h3.temporal_shape(length)[2]
-    latent, frame_count = h3._empty_av_latent(width, height, length)
+    if provided_latent is not None:
+        # Sampling a supplied latent, so the canvas is whatever IT is --
+        # width/height/length came from _geometry_from_latent. Everything below
+        # encodes keyframe and reference media against that same canvas, which
+        # is the requirement: a keyframe's cond rows are built on the target's
+        # own grid.
+        video, audio = _av_streams(provided_latent)
+        latent = provided_latent
+        frame_count = sum(h3model.FRAME_PER_TOKEN[k % 5] for k in range(int(video.shape[2])))
+        target_audio_t = int(audio.shape[-1])
+    else:
+        target_audio_t = h3.temporal_shape(length)[2]
+        latent, frame_count = h3._empty_av_latent(width, height, length)
 
-    # --- keyframes (adapted from _empty_image_conditioning) ---
-    # Video keyframes -- verified working via real generation tests
-    # (stitching separate clips together, both as a hard cut and as a
-    # genuine smooth transition depending on prompt/duration), no native
-    # precedent. Native code (both this project's earlier version and
-    # comfy_extras/nodes_minimax_h3.py's own MiniMaxH3ImageToVideo) only
-    # ever accepts a single image per keyframe -- confirmed by reading the
-    # native node, not assumed. PackedLayout's keyframe ("cond") segment is
-    # built as ONE frame's worth of position ids per keyframe with no
-    # temporal loop, unlike the reference-video path which already does
-    # (_video_grid(vt, r_frame, cursor)). This reuses that same multi-frame
-    # machinery for a "cond" segment instead -- nothing in the checkpoint's
-    # public training details confirms it was trained on a multi-frame cond
-    # segment specifically, but real generation testing confirms the result
-    # works. See _corrected_packed_layout for the position-id side of this.
-    # Separate from the above: audio keyframes. Reuses
+    # --- keyframes ---
+    # A video keyframe builds a multi-frame "cond" segment, reusing the same
+    # _video_grid machinery the reference-video path uses. See
+    # _corrected_packed_layout for the position-id side.
+    # Audio keyframes reuse
     # _encode_reference_audio (already generic -- no length constraint like
     # video's %17==5 patchify grouping) but pins the result to a specific
     # point in the TARGET's own audio track (a new "cond_audio" segment
@@ -1159,7 +1252,7 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
         frames, _soundtrack, source_fps = _video_parts(_load_media_file(item.filename, "video"))
         # a video keyframe's audio track is deliberately dropped -- pinning
         # audio content to a specific point in the target's own audio track
-        # has no architectural equivalent to reuse (see conversation/README);
+        # has no architectural equivalent to reuse;
         # only the visual content is used here.
         frames = _resample_video_frames(frames, source_fps)
         frames = h3._resize(frames, width, height, "center")  # must match the target canvas exactly -- a cond segment shares the target's own frame grid, unlike a reference video's independent canvas
@@ -1356,9 +1449,9 @@ def _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, le
 
 
 class MiniMaxH3ConditioningTimelineIntegration:
-    """Consumes a `timeline` bundle plus a MODEL/CLIP/VAE/VAE wired directly
-    from native loader nodes (Load Diffusion Model, Load CLIP with
-    type=minimax, Load VAE x2 -- NOT MiniMax H3 Easy Loader's bundle), and
+    """Consumes a `timeline` bundle plus a CLIP and VAE wired directly from
+    native loader nodes (Load CLIP with type=minimax, Load VAE -- NOT MiniMax
+    H3 Easy Loader's bundle), and
     builds ONE conditioning object carrying both keyframes and references
     together -- the combination native ComfyUI cannot correctly combine (see
     module docstring for the two bugs and their fix).
@@ -1372,30 +1465,31 @@ class MiniMaxH3ConditioningTimelineIntegration:
     means there is nothing to substitute -- what's connected on the canvas,
     before you run anything, IS what gets used.
 
-    video_vae/audio_vae are REQUIRED INPUTS (this node uses them internally
-    to encode keyframe/reference media into latents) but are deliberately
-    NOT re-emitted as outputs. Only `model` needs to flow out of this node --
-    it may be a cloned, patched object, not the same one that came in (see
-    below) -- so it's the only thing downstream nodes are forced to route
-    through here. VAEDecode/VAEDecodeAudio should wire directly to the same
-    Load VAE nodes connected here instead of through this node's output,
-    which used to exist purely as a passthrough and just added an unneeded
-    dependency for anyone whose graph already wires VAE elsewhere."""
+    NO MODEL PASSES THROUGH THIS NODE. The patches that make the timeline's
+    semantics work live in exactly one place -- MiniMaxH3TimelineModelPatch,
+    chained next to Load Diffusion Model like MiniMaxH3SigmaShift and
+    ModelAttentionBackend are. This node used to take MODEL in and hand a
+    patched clone back out, which made it the only conditioning node in the
+    graph shaped that way and gave two different places the model could come
+    from. One way now, no ambiguity.
+
+    video_vae is required (this node uses it to encode keyframe/reference
+    media into latents); audio_vae is required only when a card is audio,
+    matching native MiniMaxH3AddGuide. Neither is re-emitted as an output --
+    wire VAEDecode/VAEDecodeAudio directly to the same Load VAE nodes."""
 
     CATEGORY = "MiniMax H3 Timeline"
     FUNCTION = "generate"
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "FLOAT")
-    RETURN_NAMES = ("model", "positive", "latent", "fps")
-    DESCRIPTION = "Builds combined keyframe+reference conditioning from a Timeline Editor bundle. Connect a MODEL from Load Diffusion Model, a CLIP from Load CLIP (type=minimax), and two VAEs from Load VAE -- not MiniMax H3 Easy Loader's bundle -- so the checkpoint in use is whatever's visibly wired in, not resolved silently at runtime. Wire VAEDecode/VAEDecodeAudio directly to the same Load VAE nodes, not through this node's output -- only `model` needs to come from here."
+    RETURN_TYPES = ("CONDITIONING", "LATENT", "FLOAT")
+    RETURN_NAMES = ("positive", "latent", "fps")
+    DESCRIPTION = "Builds combined keyframe+reference conditioning from a Timeline Editor bundle. Connect a CLIP from Load CLIP (type=minimax) and the MiniMax H3 video VAE (plus the audio VAE only if a card is audio). The MODEL does NOT come through here -- chain MiniMax H3 Timeline Model Patch next to Load Diffusion Model instead, or the per-item noise_aug and corrected layout are silently ignored."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "video_vae": ("VAE",),
-                "audio_vae": ("VAE",),
                 "timeline": ("MINIMAX_H3_TIMELINE",),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "resolution": (list(RESOLUTION_MEGAPIXELS.keys()), {"default": RESOLUTION_480}),
@@ -1403,85 +1497,269 @@ class MiniMaxH3ConditioningTimelineIntegration:
                 "ref_image_size": (["match", "1k", "1.5k", "2k", "original"], {"default": "match"}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0}),
             },
+            "optional": {
+                # When connected, THIS defines the canvas -- width/height/length
+                # are read from it and the resolution/aspect widgets are ignored.
+                # Leave it unconnected to build a fresh empty latent from the
+                # widgets, which is the default behaviour.
+                "latent": ("LATENT",),
+                # Only needed when a card is AUDIO (reference audio, a reference
+                # video's soundtrack, or an audio keyframe) -- same policy as
+                # native MiniMaxH3AddGuide's optional audio_vae.
+                "audio_vae": ("VAE",),
+            },
         }
 
-    def generate(self, model, clip, video_vae, audio_vae, timeline, prompt, resolution, aspect_ratio, ref_image_size, fps=24.0):
+    def generate(self, clip, video_vae, timeline, prompt, resolution, aspect_ratio, ref_image_size,
+                 fps=24.0, audio_vae=None, latent=None):
         if not isinstance(timeline, MiniMaxH3TimelineBundle):
             raise ValueError("Connect a MiniMax H3 Timeline Editor output")
-        has_keyframe = any(i.role in KEYFRAME_ROLES for i in timeline.items)
-        has_reference = any(i.role == REFERENCE for i in timeline.items)
-        has_mid_keyframe = any(i.role == KEYFRAME_MID for i in timeline.items)
-        # A video keyframe builds a multi-frame "cond" segment
-        # (see _corrected_packed_layout) that native's own PackedLayout has
-        # no code path for -- it would silently build a mismatched
-        # single-frame-sized position/update array against the actual
-        # multi-frame row count _cond_video_rows produces. Always route
-        # through the corrected layout when one is present.
-        has_video_keyframe = any(i.role in KEYFRAME_ROLES and i.media_type == "video" for i in timeline.items)
-        # Same reasoning as has_video_keyframe, for the new "cond_audio"
-        # segment kind: native's seg_tag/PackedLayout has no entry for it at
-        # all (would KeyError), so any audio keyframe always forces the
-        # corrected layout + our own _make_fixed_forward.
-        has_audio_keyframe = any(i.role in KEYFRAME_ROLES and i.media_type == "audio" for i in timeline.items)
-
-        width, height = _canvas_dimensions(resolution, aspect_ratio, 0, 0)
-        length = _frame_length(timeline.duration_seconds, h3.FPS)
-
-        conditioning, latent = _combined_conditioning(clip, video_vae, audio_vae, prompt, width, height, length, ref_image_size, timeline)
-
-        # The patched layout builder is needed whenever native PackedLayout
-        # can't correctly express what's being asked: the keyframe+reference
-        # origin bug (bug 1+2, see module docstring), any mid-clip keyframe
-        # (native only knows first/last), or any video keyframe (native has
-        # no multi-frame cond segment code path at all). References no
-        # longer anchor, so that's no longer a trigger condition here.
-        needs_layout_patch = (has_keyframe and has_reference) or has_mid_keyframe or has_video_keyframe or has_audio_keyframe
-        # Per-item noise_aug needs to apply to a pure-keyframe or
-        # pure-reference generation too, not just combined ones -- separate
-        # trigger from the layout patch above. needs_layout_patch always
-        # implies this one (both its disjuncts require has_keyframe or
-        # has_reference), so extra_conds gets patched whenever this is true,
-        # not only when needs_layout_patch is -- native extra_conds never
-        # builds cond_video_noise_augs/cond_audio_noise_augs at all, so a
-        # pure-keyframe-only or pure-reference-only generation would
-        # otherwise silently fall back to the global scalar for every row,
-        # with no per-item control despite the card UI showing one.
-        needs_noise_aug_patch = has_keyframe or has_reference
-        if needs_noise_aug_patch:
-            _incompat = _dit_compatibility_report(model)
-            if _incompat:
-                print(
-                    "[MiniMaxH3-Timeline] This ComfyUI build's MiniMax H3 model is "
-                    f"missing {_incompat!r}, which the timeline patches rely on. "
-                    "Applying NOTHING (the Timeline Editor's keyframes/references "
-                    "still run through native MiniMax H3, minus the per-item "
-                    "noise_aug and the keyframe/reference origin fixes). Pin "
-                    "ComfyUI to a tested version or update this pack."
-                )
-                needs_noise_aug_patch = False
-        if needs_noise_aug_patch:
-            model = model.clone()
-            original_model = model.model
-            model.add_object_patch(
-                "extra_conds",
-                _make_fixed_extra_conds(
-                    original_model, timeline.pretimeline_gap_seconds, timeline.spatial_collision_offset,
-                    timeline.anchor_decouple_scale_seconds,
-                ),
+        # No MODEL here by design. The model patches live in exactly one place --
+        # MiniMaxH3TimelineModelPatch, chained next to Load Diffusion Model.
+        # This node builds conditioning and nothing else, so it has the same
+        # shape as every other conditioning node and there is no second way to
+        # wire it. Which timeline features are in play no longer has to be
+        # decided here either: fixed_extra_conds gates itself at runtime on
+        # what the conditioning actually carries.
+        if audio_vae is None and any(i.media_type == "audio" for i in timeline.items):
+            raise ValueError(
+                "This timeline has an audio card, which has to be VAE-encoded to a latent -- "
+                "connect audio_vae (Load VAE with the MiniMax H3 audio VAE). "
+                "It is only required when a card is audio."
             )
-            # add_object_patch supports dotted paths (comfy.utils.set_attr/
-            # resolve_attr), so this reaches the DiT instance nested inside
-            # the model directly.
-            original_diffusion_model = original_model.diffusion_model
-            model.add_object_patch("diffusion_model._cond_video_rows", _make_fixed_cond_video_rows(original_diffusion_model))
-            model.add_object_patch("diffusion_model._cond_audio_rows", _make_fixed_cond_audio_rows(original_diffusion_model))
-            # Per-ROW apparent timestep (see _make_fixed_forward's docstring)
-            # -- decouples each row's noise-injection amount (above) from how
-            # "resolved" the model is told that row is, which native ties to
-            # the same single scalar.
-            model.add_object_patch("diffusion_model._forward", _make_fixed_forward(original_diffusion_model))
 
-        return (model, conditioning, latent, float(fps))
+        # TARGET GEOMETRY. Single source of truth for the canvas everything --
+        # the latent, keyframe media, reference sizing -- gets built at. A
+        # connected `latent` wins over the resolution/aspect widgets: the
+        # canvas has to be the one actually being sampled, and only the latent
+        # knows that for certain. Nothing downstream of this point changes --
+        # placement, ordering, anchoring and per-item noise_aug never learn
+        # where the numbers came from.
+        if latent is not None:
+            width, height, length = _geometry_from_latent(latent)
+        else:
+            width, height = _canvas_dimensions(resolution, aspect_ratio, 0, 0)
+            length = _frame_length(timeline.duration_seconds, h3.FPS)
+
+        conditioning, latent = _combined_conditioning(
+            clip, video_vae, audio_vae, prompt, width, height, length, ref_image_size, timeline,
+            provided_latent=latent)
+
+        return (conditioning, latent, float(fps))
+
+
+class MiniMaxH3TimelineModelPatch:
+    """Installs the timeline's model patches, standalone -- chain it next to
+    Load Diffusion Model the way MiniMaxH3SigmaShift / ModelAttentionBackend
+    are chained, instead of routing MODEL in and out of the Conditioning node.
+
+    Exactly the same four patches, in the same order, with the same captured
+    values (see _apply_timeline_patches). object_patches survive
+    ModelPatcher.clone(), so this can sit anywhere in the model chain --
+    before or after LoRA / sigma shift / attention backend.
+
+    SAFE TO LEAVE CONNECTED for non-timeline generations: the patched
+    extra_conds early-outs to native when a conditioning carries no
+    minimax_keyframes / minimax_refs / minimax_audio_keyframes, so a plain
+    t2v run through this model is bit-identical to an unpatched one. Without
+    that early-out an unconditionally-patched model would shift every plain
+    generation by pretimeline_gap.
+
+    REQUIRED for any timeline generation. The Conditioning node has no MODEL
+    input, so this is the only place the patches get installed. Omit it and
+    nothing errors: an unpatched model reads a timeline payload with native's
+    per-KIND seg_t and silently ignores the per-item noise_aug lists."""
+
+    CATEGORY = "MiniMax H3 Timeline"
+    FUNCTION = "patch"
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
+    DESCRIPTION = ("Applies the MiniMax H3 Timeline model patches (per-item noise_aug, "
+                   "corrected packed layout, per-row timesteps). Chain next to Load "
+                   "Diffusion Model, then leave the Conditioning node's `model` input "
+                   "unconnected. Harmless on non-timeline generations.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"model": ("MODEL",)},
+            "optional": {
+                "pretimeline_gap_seconds": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1,
+                    "tooltip": "Gap between the last reference block and the video's real "
+                               "start, in seconds of rotary time."}),
+                "spatial_collision_offset": ("FLOAT", {
+                    "default": 64.0, "min": 0.0, "max": 512.0, "step": 1.0,
+                    "tooltip": "Only used by the dormant per-reference anchoring path. "
+                               "Leave as-is."}),
+                "anchor_decouple_scale_seconds": ("FLOAT", {
+                    "default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1,
+                    "tooltip": "Only used by the dormant per-reference anchoring path. "
+                               "Leave as-is."}),
+            },
+        }
+
+    def patch(self, model, pretimeline_gap_seconds=1.0, spatial_collision_offset=64.0,
+              anchor_decouple_scale_seconds=2.0):
+        patched, incompat = _apply_timeline_patches(
+            model, pretimeline_gap_seconds, spatial_collision_offset,
+            anchor_decouple_scale_seconds)
+        if incompat:
+            print(_INCOMPAT_MESSAGE.format(incompat))
+        else:
+            print("[MiniMaxH3-Timeline] model patched: extra_conds, "
+                  "diffusion_model._cond_video_rows, ._cond_audio_rows, ._forward "
+                  f"(pretimeline_gap={pretimeline_gap_seconds}s)")
+        return (patched,)
+
+
+_UPSCALER_PACK_DIRS = ("Comfyui_Minimax_h3_latent_Upscaler",)
+_upscaler_module_cache = {}
+
+
+def _latent_upscaler_module():
+    """Import the neural latent-upscaler backbone from the sibling custom-node
+    pack, if it is installed. Cached. Returns None when it is not present --
+    callers raise their own message rather than failing on an ImportError."""
+    if "mod" in _upscaler_module_cache:
+        return _upscaler_module_cache["mod"]
+    mod = None
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for pack in _UPSCALER_PACK_DIRS:
+        path = os.path.join(here, pack, "nodes", "minimax_h3_latent_upscaler_3d.py")
+        if not os.path.isfile(path):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("_mmxtl_upscaler_3d", path)
+            candidate = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(candidate)
+            if all(hasattr(candidate, a) for a in ("load_model", "_make_norm_tensors")):
+                mod = candidate
+                break
+        except Exception as e:  # pragma: no cover - optional dependency
+            print(f"[MiniMaxH3-Timeline] latent upscaler pack found but not importable: {e}")
+    _upscaler_module_cache["mod"] = mod
+    return mod
+
+
+def _upscale_video_latent(mod, model, z, scale, out_h, out_w, dtype, device):
+    """One [B,24,T,H,W] latent through the upscaler backbone, normalized the way
+    it was trained and returned on the CPU at its original dtype."""
+    orig_dtype = z.dtype
+    s = z.to(device=device, dtype=dtype, copy=True)
+    mean, std = mod._make_norm_tensors(device, dtype)
+    with torch.inference_mode():
+        out = model((s - mean) / std, scale=scale,
+                    target_size=(s.shape[2], out_h, out_w), enable_chunking=False)
+        out = out * std + mean
+    return out.to(device="cpu", dtype=orig_dtype)
+
+
+class MiniMaxH3TimelineLatentUpscale:
+    """Upscales an H3 AV latent AND carries its conditioning to the new canvas,
+    as one node, so the two cannot end up describing different sizes.
+
+    A keyframe's cond rows are built on the TARGET's frame grid while
+    _cond_video_rows patchifies the keyframe's own latent, so a resized latent
+    needs its keyframes resized with it. Emitting both from one node makes that
+    structural instead of something to wire correctly: the `positive` and
+    `latent` outputs are always a matched pair.
+
+    Keyframe latents go through the same trained upscaler as the target rather
+    than being interpolated -- it is the model that exists for this. References
+    are left untouched: a reference carries its own canvas and is never sized
+    against the target grid. Audio keyframes are untouched too; the resize is
+    spatial only.
+
+    Replaces LTXVSeparateAVLatent -> upscaler -> LTXVConcatAVLatent, and removes
+    the need for a second Conditioning node at the new resolution."""
+
+    CATEGORY = "MiniMax H3 Timeline"
+    FUNCTION = "upscale"
+    RETURN_TYPES = ("CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "latent")
+    DESCRIPTION = ("Upscales a MiniMax H3 AV latent and brings its keyframe conditioning "
+                   "with it, as a matched pair. Drop it between the two samplers of a "
+                   "two-pass workflow -- no second Conditioning node, no Separate/Concat.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        models = folder_paths.get_filename_list("latent_upscale_models")
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "latent": ("LATENT",),
+                "model_name": (models if models else ["(place a model in models/latent_upscale_models)"],),
+                "scale": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.05,
+                                    "tooltip": "Spatial upscale factor. Time is unchanged."}),
+            },
+            "optional": {
+                "precision": (["fp16", "bf16", "fp32"], {"default": "fp16"}),
+            },
+        }
+
+    def upscale(self, positive, latent, model_name, scale, precision="fp16"):
+        mod = _latent_upscaler_module()
+        if mod is None:
+            raise ValueError(
+                "This node needs the MiniMax H3 latent upscaler pack installed alongside "
+                "it (custom_nodes/Comfyui_Minimax_h3_latent_Upscaler) -- it uses that "
+                "pack's trained backbone. Install it, or upscale the latent yourself and "
+                "connect the result to the Conditioning node's `latent` input instead."
+            )
+        if str(model_name).startswith("("):
+            raise ValueError("Put a latent upscaler checkpoint in models/latent_upscale_models")
+
+        video, audio = _av_streams(latent)
+        in_h, in_w = int(video.shape[3]), int(video.shape[4])
+        # Align in PIXEL space to CANVAS_MULTIPLE so the resulting latent is even
+        # on both axes -- the DiT patchifies 2x2, and _geometry_from_latent
+        # rejects an odd latent for the same reason.
+        px_w = max(h3.CANVAS_MULTIPLE, round(in_w * 16 * scale / h3.CANVAS_MULTIPLE) * h3.CANVAS_MULTIPLE)
+        px_h = max(h3.CANVAS_MULTIPLE, round(in_h * 16 * scale / h3.CANVAS_MULTIPLE) * h3.CANVAS_MULTIPLE)
+        out_w, out_h = px_w // 16, px_h // 16
+        if (out_w, out_h) == (in_w, in_h):
+            return (positive, latent)
+        if out_w < in_w or out_h < in_h:
+            raise ValueError("This model only upscales (scale >= 1.0)")
+
+        device = comfy.model_management.get_torch_device() if precision != "cpu" else torch.device("cpu")
+        dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[precision]
+        model = mod.load_model(model_name, device, precision)
+        # the effective factor the backbone is told, averaged over both axes the
+        # same way the upscaler's own size modes derive it
+        eff = ((out_w / in_w) + (out_h / in_h)) / 2.0
+
+        print(f"[MiniMaxH3-Timeline] latent {in_w}x{in_h} -> {out_w}x{out_h} "
+              f"({px_w}x{px_h} px), scale={eff:.3f}")
+        up_video = _upscale_video_latent(mod, model, video, eff, out_h, out_w, dtype, device)
+        out_latent = {"samples": comfy.nested_tensor.NestedTensor((up_video, audio))}
+
+        # carry the conditioning to the same canvas: keyframes only
+        n_kf = 0
+        new_cond = []
+        for tensor, d in positive:
+            nd = dict(d)
+            kfs = nd.get("minimax_keyframes")
+            if kfs:
+                moved = []
+                for kf in kfs:
+                    nkf = dict(kf)          # every other key rides along untouched
+                    z = kf.get("latent")
+                    if z is not None and (int(z.shape[-2]) != out_h or int(z.shape[-1]) != out_w):
+                        k_eff = ((out_w / int(z.shape[-1])) + (out_h / int(z.shape[-2]))) / 2.0
+                        nkf["latent"] = _upscale_video_latent(
+                            mod, model, z, k_eff, out_h, out_w, dtype, device)
+                        nkf["latent_t"] = int(nkf["latent"].shape[2])
+                        n_kf += 1
+                    moved.append(nkf)
+                nd["minimax_keyframes"] = moved
+            new_cond.append([tensor, nd])
+        if n_kf:
+            print(f"[MiniMaxH3-Timeline] {n_kf} keyframe latent(s) moved to the new canvas")
+
+        comfy.model_management.soft_empty_cache()
+        return (new_cond, out_latent)
 
 
 class MiniMaxH3TextEncoderLoader:
@@ -1626,10 +1904,14 @@ class MiniMaxH3TextEncoderLoader:
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3TimelineEditor": MiniMaxH3TimelineEditor,
     "MiniMaxH3ConditioningTimelineIntegration": MiniMaxH3ConditioningTimelineIntegration,
+    "MiniMaxH3TimelineModelPatch": MiniMaxH3TimelineModelPatch,
+    "MiniMaxH3TimelineLatentUpscale": MiniMaxH3TimelineLatentUpscale,
     "MiniMaxH3TextEncoderLoader": MiniMaxH3TextEncoderLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3TimelineEditor": "MiniMax H3 Timeline Editor",
     "MiniMaxH3ConditioningTimelineIntegration": "MiniMax H3 Conditioning (Timeline Integration)",
+    "MiniMaxH3TimelineModelPatch": "MiniMax H3 Timeline Model Patch",
+    "MiniMaxH3TimelineLatentUpscale": "MiniMax H3 Timeline Latent Upscale",
     "MiniMaxH3TextEncoderLoader": "MiniMax H3 Text Encoder Loader (config override)",
 }
