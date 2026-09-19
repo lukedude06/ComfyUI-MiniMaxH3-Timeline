@@ -7,10 +7,8 @@ Nodes:
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import math
-import os
 import re
 from dataclasses import dataclass
 from typing import Mapping
@@ -21,8 +19,6 @@ import torchaudio
 
 import node_helpers
 import nodes
-import comfy.model_management
-import comfy.nested_tensor
 import comfy.sd
 import comfy.utils
 from comfy_api.latest import InputImpl
@@ -619,201 +615,6 @@ class MiniMaxH3ConditioningTimelineIntegration:
         return (conditioning, latent, float(fps))
 
 
-_UPSCALER_PACK_DIRS = ("Comfyui_Minimax_h3_latent_Upscaler",)
-_upscaler_module_cache = {}
-
-
-def _latent_upscaler_module():
-    """Import the neural latent-upscaler backbone from the sibling custom-node
-    pack, if it is installed. Cached. Returns None when it is not present --
-    callers raise their own message rather than failing on an ImportError."""
-    if "mod" in _upscaler_module_cache:
-        return _upscaler_module_cache["mod"]
-    mod = None
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for pack in _UPSCALER_PACK_DIRS:
-        path = os.path.join(here, pack, "nodes", "minimax_h3_latent_upscaler_3d.py")
-        if not os.path.isfile(path):
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location("_mmxtl_upscaler_3d", path)
-            candidate = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(candidate)
-            if all(hasattr(candidate, a) for a in ("MinimaxH3LatentUpscaler3D", "UpscaleMode")):
-                mod = candidate
-                break
-        except Exception as e:  # pragma: no cover - optional dependency
-            print(f"[MiniMaxH3-Timeline] latent upscaler pack found but not importable: {e}")
-    _upscaler_module_cache["mod"] = mod
-    return mod
-
-
-def _run_latent_upscaler(mod, z, model_name, mode, align, enable_temporal_chunking,
-                         force_unload, device, precision):
-    """Run the sibling pack through its public 3D node implementation."""
-    result = mod.MinimaxH3LatentUpscaler3D.execute(
-        latent={"samples": z}, model_name=model_name, mode=mode, align=align,
-        enable_temporal_chunking=enable_temporal_chunking,
-        force_unload=force_unload, device=device, precision=precision,
-    )
-    return result.result[0]["samples"]
-
-
-class MiniMaxH3TimelineLatentUpscale:
-    """Upscales an H3 AV latent AND carries its conditioning to the new canvas,
-    as one node, so the two cannot end up describing different sizes.
-
-    A keyframe's cond rows are built on the TARGET's frame grid while
-    _cond_video_rows patchifies the keyframe's own latent, so a resized latent
-    needs its keyframes resized with it. Emitting both from one node makes that
-    structural instead of something to wire correctly: the `positive` and
-    `latent` outputs are always a matched pair.
-
-    Keyframe latents go through the same trained upscaler as the target rather
-    than being interpolated -- it is the model that exists for this. References
-    are left untouched: a reference carries its own canvas and is never sized
-    against the target grid. Audio keyframes are untouched too; the resize is
-    spatial only.
-
-    Replaces LTXVSeparateAVLatent -> upscaler -> LTXVConcatAVLatent, and removes
-    the need for a second Conditioning node at the new resolution."""
-
-    CATEGORY = "MiniMax H3 Timeline"
-    FUNCTION = "upscale"
-    RETURN_TYPES = ("CONDITIONING", "LATENT")
-    RETURN_NAMES = ("positive", "latent")
-    DESCRIPTION = ("Upscales a MiniMax H3 AV latent and brings its keyframe conditioning "
-                   "with it, as a matched pair. Uses the sibling 3D upscaler's real "
-                   "multiplier, target-dimensions, or megapixel sizing behavior.")
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        models = folder_paths.get_filename_list("latent_upscale_models")
-        return {
-            "required": {
-                "positive": ("CONDITIONING",),
-                "latent": ("LATENT",),
-                "model_name": (models if models else ["(place a model in models/latent_upscale_models)"],),
-                "resize_mode": (["megapixels", "scale by multiplier", "target dimensions"], {
-                    "default": "megapixels",
-                    "tooltip": "Same sizing modes as the sibling Minimax H3 Latent Upscaler (3D)."}),
-                "scale": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.05,
-                                    "tooltip": "Used only in scale-by-multiplier mode."}),
-                "width": ("INT", {"default": 1920, "min": 64, "max": 8192, "step": 8,
-                                  "tooltip": "Pixel width used only in target-dimensions mode."}),
-                "height": ("INT", {"default": 1088, "min": 64, "max": 8192, "step": 8,
-                                   "tooltip": "Pixel height used only in target-dimensions mode."}),
-                "megapixels": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 16.0, "step": 0.1,
-                                           "tooltip": "Target MP used only in megapixels mode (1 MP = 1024x1024 pixels)."}),
-                "align": ("INT", {"default": 32, "min": 1, "max": 512, "step": 1}),
-                "enable_temporal_chunking": ("BOOLEAN", {"default": True}),
-                "force_unload": ("BOOLEAN", {"default": True}),
-                "device": (["cuda", "rocm", "cpu"], {"default": "cuda"}),
-                "precision": (["fp16", "bf16", "fp32"], {"default": "fp16"}),
-            },
-        }
-
-    def upscale(self, positive, latent, model_name, resize_mode="megapixels", scale=2.0,
-                width=1920, height=1088, megapixels=2.0, align=32,
-                enable_temporal_chunking=True, force_unload=True,
-                device="cuda", precision="fp16"):
-        mod = _latent_upscaler_module()
-        if mod is None:
-            raise ValueError(
-                "This node needs the MiniMax H3 latent upscaler pack installed alongside "
-                "it (custom_nodes/Comfyui_Minimax_h3_latent_Upscaler) -- it uses that "
-                "pack's trained backbone. Install it, or upscale the latent yourself and "
-                "connect the result to the Conditioning node's `latent` input instead."
-            )
-        if str(model_name).startswith("("):
-            raise ValueError("Put a latent upscaler checkpoint in models/latent_upscale_models")
-
-        video, audio = _av_streams(latent)
-        in_h, in_w = int(video.shape[3]), int(video.shape[4])
-        if resize_mode == "scale by multiplier":
-            selected_mode = mod.UpscaleMode.SCALE_BY
-            raw_px_w, raw_px_h = in_w * 16 * scale, in_h * 16 * scale
-        elif resize_mode == "target dimensions":
-            selected_mode = mod.UpscaleMode.TARGET_DIMENSIONS
-            raw_px_w, raw_px_h = float(width), float(height)
-        elif resize_mode == "megapixels":
-            selected_mode = mod.UpscaleMode.MEGAPIXELS
-            target_pixels = float(megapixels) * 1024 * 1024
-            aspect = in_w / in_h
-            raw_px_h = math.sqrt(target_pixels / aspect)
-            raw_px_w = raw_px_h * aspect
-        else:
-            raise ValueError(f"Unsupported latent-upscale resize mode: {resize_mode}")
-
-        # Mirror the sibling node's pixel-space alignment exactly so we know
-        # the final canvas before deciding whether keyframes need a second pass.
-        alignment = max(1, int(align))
-        px_w = round(raw_px_w / alignment) * alignment
-        px_h = round(raw_px_h / alignment) * alignment
-        px_w = max(16, round(px_w / 16) * 16)
-        px_h = max(16, round(px_h / 16) * 16)
-        out_w, out_h = px_w // 16, px_h // 16
-        if (out_w, out_h) == (in_w, in_h):
-            return (positive, latent)
-        if out_w < in_w or out_h < in_h:
-            raise ValueError("This model only upscales (scale >= 1.0)")
-
-        visual_keyframes = sum(
-            1 for _tensor, data in positive
-            for kf in (data.get("minimax_keyframes") or [])
-            if kf.get("latent") is not None
-            and (int(kf["latent"].shape[-2]), int(kf["latent"].shape[-1])) != (out_h, out_w)
-        )
-        mode = {
-            "mode": selected_mode, "scale": float(scale),
-            "width": int(width), "height": int(height),
-            "megapixels": float(megapixels),
-        }
-        up_video = _run_latent_upscaler(
-            mod, video, model_name, mode, alignment, enable_temporal_chunking,
-            force_unload=(force_unload and visual_keyframes == 0),
-            device=device, precision=precision,
-        )
-        out_h, out_w = int(up_video.shape[-2]), int(up_video.shape[-1])
-        out_latent = {"samples": comfy.nested_tensor.NestedTensor((up_video, audio))}
-
-        # carry the conditioning to the same canvas: keyframes only
-        n_kf = 0
-        remaining_keyframes = visual_keyframes
-        new_cond = []
-        for tensor, d in positive:
-            nd = dict(d)
-            kfs = nd.get("minimax_keyframes")
-            if kfs:
-                moved = []
-                for kf in kfs:
-                    nkf = dict(kf)          # every other key rides along untouched
-                    z = kf.get("latent")
-                    if z is not None and (int(z.shape[-2]) != out_h or int(z.shape[-1]) != out_w):
-                        remaining_keyframes -= 1
-                        keyframe_mode = {
-                            "mode": mod.UpscaleMode.TARGET_DIMENSIONS,
-                            "scale": float(scale), "width": out_w * 16,
-                            "height": out_h * 16, "megapixels": 1.0,
-                        }
-                        nkf["latent"] = _run_latent_upscaler(
-                            mod, z, model_name, keyframe_mode, alignment,
-                            enable_temporal_chunking,
-                            force_unload=(force_unload and remaining_keyframes == 0),
-                            device=device, precision=precision,
-                        )
-                        nkf["latent_t"] = int(nkf["latent"].shape[2])
-                        n_kf += 1
-                    moved.append(nkf)
-                nd["minimax_keyframes"] = moved
-            new_cond.append([tensor, nd])
-        if n_kf:
-            print(f"[MiniMaxH3-Timeline] {n_kf} keyframe latent(s) moved to the new canvas")
-
-        comfy.model_management.soft_empty_cache()
-        return (new_cond, out_latent)
-
-
 class MiniMaxH3TextEncoderLoader:
     """Loads a MiniMax H3 text encoder checkpoint the same way native "Load
     CLIP" (type=minimax) does, but exposes two things that node doesn't:
@@ -956,12 +757,10 @@ class MiniMaxH3TextEncoderLoader:
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3TimelineEditor": MiniMaxH3TimelineEditor,
     "MiniMaxH3ConditioningTimelineIntegration": MiniMaxH3ConditioningTimelineIntegration,
-    "MiniMaxH3TimelineLatentUpscale": MiniMaxH3TimelineLatentUpscale,
     "MiniMaxH3TextEncoderLoader": MiniMaxH3TextEncoderLoader,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3TimelineEditor": "MiniMax H3 Timeline Editor",
     "MiniMaxH3ConditioningTimelineIntegration": "MiniMax H3 Conditioning (Timeline Integration)",
-    "MiniMaxH3TimelineLatentUpscale": "MiniMax H3 Timeline Latent Upscale",
     "MiniMaxH3TextEncoderLoader": "MiniMax H3 Text Encoder Loader (config override)",
 }

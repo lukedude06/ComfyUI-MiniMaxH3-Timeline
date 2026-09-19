@@ -1,8 +1,8 @@
 {
   "id": "minimax-h3-timeline-native-2pass-upscale",
   "revision": 0,
-  "last_node_id": 28,
-  "last_link_id": 34,
+  "last_node_id": 31,
+  "last_link_id": 41,
   "nodes": [
     {
       "id": 1,
@@ -57,7 +57,8 @@
           "name": "CLIP",
           "type": "CLIP",
           "links": [
-            8
+            8,
+            12
           ],
           "slot_index": 0
         }
@@ -92,7 +93,8 @@
           "type": "VAE",
           "links": [
             9,
-            28
+            13,
+            35
           ],
           "slot_index": 0
         }
@@ -126,7 +128,8 @@
           "type": "VAE",
           "links": [
             10,
-            30
+            14,
+            37
           ],
           "slot_index": 0
         }
@@ -175,7 +178,7 @@
       },
       "widgets_values": [
         "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-        1.0
+        1
       ],
       "title": "Turbo LoRA (8-step)"
     },
@@ -214,8 +217,8 @@
         "Node name for S&R": "MiniMaxH3SigmaShift"
       },
       "widgets_values": [
-        12.0,
-        3.0
+        12,
+        3
       ]
     },
     {
@@ -278,7 +281,8 @@
           "name": "timeline",
           "type": "MINIMAX_H3_TIMELINE",
           "links": [
-            11
+            11,
+            15
           ],
           "slot_index": 0
         }
@@ -287,10 +291,10 @@
         "Node name for S&R": "MiniMaxH3TimelineEditor"
       },
       "widgets_values": [
-        5.0,
+        5,
         0.999,
-        1.0,
-        "[{\"filename\": \"tl_keyframe.png\", \"type\": \"image\", \"role\": \"keyframe_start\", \"anchor_seconds\": -1}, {\"filename\": \"tl_reference.png\", \"type\": \"image\", \"role\": \"reference\", \"anchor_seconds\": -1}]"
+        1,
+        "[{\"filename\":\"tl_keyframe.png\",\"type\":\"image\",\"role\":\"keyframe_start\",\"anchor_seconds\":-1},{\"filename\":\"tl_reference.png\",\"type\":\"image\",\"role\":\"reference\",\"anchor_seconds\":-1}]"
       ]
     },
     {
@@ -339,8 +343,7 @@
           "name": "positive",
           "type": "CONDITIONING",
           "links": [
-            13,
-            19
+            17
           ],
           "slot_index": 0
         },
@@ -348,16 +351,14 @@
           "name": "latent",
           "type": "LATENT",
           "links": [
-            18
+            22
           ],
           "slot_index": 1
         },
         {
           "name": "fps",
           "type": "FLOAT",
-          "links": [
-            33
-          ],
+          "links": [],
           "slot_index": 2
         }
       ],
@@ -369,8 +370,9 @@
         "480P",
         "16:9",
         "match",
-        24.0
-      ]
+        24
+      ],
+      "title": "Conditioning (pass 1 - low res)"
     },
     {
       "id": 11,
@@ -392,8 +394,8 @@
           "name": "NOISE",
           "type": "NOISE",
           "links": [
-            14,
-            22
+            18,
+            29
           ],
           "slot_index": 0
         }
@@ -425,8 +427,8 @@
           "name": "SAMPLER",
           "type": "SAMPLER",
           "links": [
-            16,
-            24
+            20,
+            31
           ],
           "slot_index": 0
         }
@@ -464,7 +466,7 @@
           "name": "SIGMAS",
           "type": "SIGMAS",
           "links": [
-            12
+            16
           ],
           "slot_index": 0
         }
@@ -475,7 +477,7 @@
       "widgets_values": [
         "simple",
         8,
-        1.0
+        1
       ],
       "title": "8-step schedule (full)"
     },
@@ -497,7 +499,7 @@
         {
           "name": "sigmas",
           "type": "SIGMAS",
-          "link": 12
+          "link": 16
         }
       ],
       "outputs": [
@@ -505,7 +507,7 @@
           "name": "high_sigmas",
           "type": "SIGMAS",
           "links": [
-            17
+            21
           ],
           "slot_index": 0
         },
@@ -546,7 +548,7 @@
         {
           "name": "conditioning",
           "type": "CONDITIONING",
-          "link": 13
+          "link": 17
         }
       ],
       "outputs": [
@@ -554,7 +556,7 @@
           "name": "GUIDER",
           "type": "GUIDER",
           "links": [
-            15
+            19
           ],
           "slot_index": 0
         }
@@ -583,27 +585,27 @@
         {
           "name": "noise",
           "type": "NOISE",
-          "link": 14
+          "link": 18
         },
         {
           "name": "guider",
           "type": "GUIDER",
-          "link": 15
+          "link": 19
         },
         {
           "name": "sampler",
           "type": "SAMPLER",
-          "link": 16
+          "link": 20
         },
         {
           "name": "sigmas",
           "type": "SIGMAS",
-          "link": 17
+          "link": 21
         },
         {
           "name": "latent_image",
           "type": "LATENT",
-          "link": 18
+          "link": 22
         }
       ],
       "outputs": [
@@ -617,7 +619,7 @@
           "name": "denoised_output",
           "type": "LATENT",
           "links": [
-            20
+            23
           ],
           "slot_index": 1
         }
@@ -652,41 +654,36 @@
     },
     {
       "id": 18,
-      "type": "MiniMaxH3TimelineLatentUpscale",
+      "type": "LTXVSeparateAVLatent",
       "pos": [
         1360,
         1120
       ],
       "size": [
-        340,
-        350
+        300,
+        78
       ],
       "flags": {},
       "order": 18,
       "mode": 0,
       "inputs": [
         {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 19
-        },
-        {
-          "name": "latent",
+          "name": "av_latent",
           "type": "LATENT",
-          "link": 20
+          "link": 23
         }
       ],
       "outputs": [
         {
-          "name": "positive",
-          "type": "CONDITIONING",
+          "name": "video_latent",
+          "type": "LATENT",
           "links": [
-            21
+            24
           ],
           "slot_index": 0
         },
         {
-          "name": "latent",
+          "name": "audio_latent",
           "type": "LATENT",
           "links": [
             26
@@ -695,27 +692,193 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "MiniMaxH3TimelineLatentUpscale"
+        "Node name for S&R": "LTXVSeparateAVLatent"
+      },
+      "widgets_values": [],
+      "title": "Separate AV latent"
+    },
+    {
+      "id": 19,
+      "type": "MinimaxH3LatentUpscaler3D",
+      "pos": [
+        1360,
+        1280
+      ],
+      "size": [
+        300,
+        230
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "latent",
+          "type": "*",
+          "link": 24
+        }
+      ],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "*",
+          "links": [
+            25
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MinimaxH3LatentUpscaler3D"
       },
       "widgets_values": [
         "minimax_h3_latent_upscaler_3d_fp16.safetensors",
         "megapixels",
-        2.0,
-        1920,
-        1088,
-        2.0,
+        2,
         32,
         true,
         true,
         "cuda",
         "fp16"
-      ]
+      ],
+      "title": "Upscale VIDEO latent only",
+      "widgets_values_named": {
+        "model_name": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        "mode": "megapixels",
+        "mode.megapixels": 2,
+        "align": 32,
+        "enable_temporal_chunking": true,
+        "force_unload": true,
+        "device": "cuda",
+        "precision": "fp16"
+      }
     },
     {
-      "id": 19,
-      "type": "ManualSigmas",
+      "id": 20,
+      "type": "LTXVConcatAVLatent",
+      "pos": [
+        1360,
+        1600
+      ],
+      "size": [
+        300,
+        100
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video_latent",
+          "type": "LATENT",
+          "link": 25
+        },
+        {
+          "name": "audio_latent",
+          "type": "LATENT",
+          "link": 26
+        }
+      ],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            27
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LTXVConcatAVLatent"
+      },
+      "widgets_values": [],
+      "title": "Concat AV latent"
+    },
+    {
+      "id": 21,
+      "type": "MiniMaxH3ConditioningTimelineIntegration",
       "pos": [
         900,
+        1120
+      ],
+      "size": [
+        400,
+        460
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 12
+        },
+        {
+          "name": "video_vae",
+          "type": "VAE",
+          "link": 13
+        },
+        {
+          "name": "timeline",
+          "type": "MINIMAX_H3_TIMELINE",
+          "link": 15
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "link": 27
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            28
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            33
+          ],
+          "slot_index": 1
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            40
+          ],
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3ConditioningTimelineIntegration"
+      },
+      "widgets_values": [
+        "integrated_multimodal_description: [Shot 1] Slow push-in on a stone courtyard at dusk, <Picture 1> walking toward camera.\n\noverall_soundscape: quiet evening ambience with distant birds throughout",
+        "480P",
+        "16:9",
+        "match",
+        24
+      ],
+      "title": "Conditioning (pass 2 - rebuilt from source)"
+    },
+    {
+      "id": 22,
+      "type": "ManualSigmas",
+      "pos": [
+        440,
         1120
       ],
       "size": [
@@ -723,7 +886,7 @@
         78
       ],
       "flags": {},
-      "order": 19,
+      "order": 22,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -731,7 +894,7 @@
           "name": "SIGMAS",
           "type": "SIGMAS",
           "links": [
-            25
+            32
           ],
           "slot_index": 0
         }
@@ -745,10 +908,10 @@
       "title": "Refine sigmas (verified)"
     },
     {
-      "id": 20,
+      "id": 23,
       "type": "BasicGuider",
       "pos": [
-        900,
+        440,
         1280
       ],
       "size": [
@@ -756,7 +919,7 @@
         100
       ],
       "flags": {},
-      "order": 20,
+      "order": 23,
       "mode": 0,
       "inputs": [
         {
@@ -767,7 +930,7 @@
         {
           "name": "conditioning",
           "type": "CONDITIONING",
-          "link": 21
+          "link": 28
         }
       ],
       "outputs": [
@@ -775,7 +938,7 @@
           "name": "GUIDER",
           "type": "GUIDER",
           "links": [
-            23
+            30
           ],
           "slot_index": 0
         }
@@ -787,10 +950,10 @@
       "title": "Guider (pass 2)"
     },
     {
-      "id": 21,
+      "id": 24,
       "type": "SamplerCustomAdvanced",
       "pos": [
-        900,
+        440,
         1400
       ],
       "size": [
@@ -798,33 +961,33 @@
         166
       ],
       "flags": {},
-      "order": 21,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
           "name": "noise",
           "type": "NOISE",
-          "link": 22
+          "link": 29
         },
         {
           "name": "guider",
           "type": "GUIDER",
-          "link": 23
+          "link": 30
         },
         {
           "name": "sampler",
           "type": "SAMPLER",
-          "link": 24
+          "link": 31
         },
         {
           "name": "sigmas",
           "type": "SIGMAS",
-          "link": 25
+          "link": 32
         },
         {
           "name": "latent_image",
           "type": "LATENT",
-          "link": 26
+          "link": 33
         }
       ],
       "outputs": [
@@ -832,8 +995,8 @@
           "name": "output",
           "type": "LATENT",
           "links": [
-            27,
-            29
+            34,
+            36
           ],
           "slot_index": 0
         },
@@ -851,29 +1014,29 @@
       "title": "Sampler (pass 2 - high res)"
     },
     {
-      "id": 22,
+      "id": 25,
       "type": "VAEDecode",
       "pos": [
         440,
-        1120
+        1680
       ],
       "size": [
         300,
         100
       ],
       "flags": {},
-      "order": 22,
+      "order": 25,
       "mode": 0,
       "inputs": [
         {
           "name": "samples",
           "type": "LATENT",
-          "link": 27
+          "link": 34
         },
         {
           "name": "vae",
           "type": "VAE",
-          "link": 28
+          "link": 35
         }
       ],
       "outputs": [
@@ -881,7 +1044,7 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            31
+            38
           ],
           "slot_index": 0
         }
@@ -892,29 +1055,29 @@
       "widgets_values": []
     },
     {
-      "id": 23,
+      "id": 26,
       "type": "VAEDecodeAudio",
       "pos": [
         440,
-        1250
+        1810
       ],
       "size": [
         300,
         100
       ],
       "flags": {},
-      "order": 23,
+      "order": 26,
       "mode": 0,
       "inputs": [
         {
           "name": "samples",
           "type": "LATENT",
-          "link": 29
+          "link": 36
         },
         {
           "name": "vae",
           "type": "VAE",
-          "link": 30
+          "link": 37
         }
       ],
       "outputs": [
@@ -922,7 +1085,7 @@
           "name": "AUDIO",
           "type": "AUDIO",
           "links": [
-            32
+            39
           ],
           "slot_index": 0
         }
@@ -933,29 +1096,29 @@
       "widgets_values": []
     },
     {
-      "id": 24,
+      "id": 27,
       "type": "CreateVideo",
       "pos": [
         440,
-        1380
+        1940
       ],
       "size": [
         300,
         166
       ],
       "flags": {},
-      "order": 24,
+      "order": 27,
       "mode": 0,
       "inputs": [
         {
           "name": "images",
           "type": "IMAGE",
-          "link": 31
+          "link": 38
         },
         {
           "name": "audio",
           "type": "AUDIO",
-          "link": 32
+          "link": 39
         },
         {
           "name": "fps",
@@ -963,7 +1126,7 @@
           "widget": {
             "name": "fps"
           },
-          "link": 33
+          "link": 40
         }
       ],
       "outputs": [
@@ -971,7 +1134,7 @@
           "name": "VIDEO",
           "type": "VIDEO",
           "links": [
-            34
+            41
           ],
           "slot_index": 0
         }
@@ -980,30 +1143,30 @@
         "Node name for S&R": "CreateVideo"
       },
       "widgets_values": [
-        24.0,
+        24,
         null,
         null
       ]
     },
     {
-      "id": 25,
+      "id": 28,
       "type": "SaveVideo",
       "pos": [
         440,
-        1540
+        2100
       ],
       "size": [
         300,
         144
       ],
       "flags": {},
-      "order": 25,
+      "order": 28,
       "mode": 0,
       "inputs": [
         {
           "name": "video",
           "type": "VIDEO",
-          "link": 34
+          "link": 41
         }
       ],
       "outputs": [
@@ -1018,73 +1181,73 @@
         "Node name for S&R": "SaveVideo"
       },
       "widgets_values": [
-        "minimax_h3_timeline_upscaled",
+        "minimax_h3_timeline_native_upscaled",
         "auto",
         "auto"
       ]
     },
     {
-      "id": 26,
-      "type": "MarkdownNote",
-      "pos": [
-        470,
-        780
-      ],
-      "size": [
-        340,
-        220
-      ],
-      "flags": {},
-      "order": 26,
-      "mode": 0,
-      "title": "Why one model chain",
-      "properties": {},
-      "widgets_values": [
-        "### Shared model chain\n\nLoRA -> SigmaShift(12,3) -> AttentionBackend, in that order -- feeds BOTH passes' guiders and the pass-1 scheduler. Timeline conditioning now uses ComfyUI's native MiniMax H3 payload and needs no model patch. The 8-step schedule below is only correct for THIS LoRA; a different step-distilled checkpoint needs a different split boundary and refine sigmas."
-      ],
-      "color": "#432",
-      "bgcolor": "#653"
-    },
-    {
-      "id": 27,
+      "id": 29,
       "type": "MarkdownNote",
       "pos": [
         1360,
-        1320
+        1840
       ],
       "size": [
-        340,
-        260
+        320,
+        250
       ],
       "flags": {},
-      "order": 27,
+      "order": 29,
       "mode": 0,
-      "title": "One node, matched pair",
+      "title": "Latent only, no conditioning",
       "properties": {},
       "widgets_values": [
-        "### The two-pass join\n\nUpscales the AV latent AND carries the keyframe conditioning to the new canvas, as one node -- the two outputs can't disagree about the canvas because they come from the same place.\n\nReplaces LTXVSeparateAVLatent -> upscaler -> LTXVConcatAVLatent AND a second Conditioning node."
+        "### Sibling latent upscaler\n\nThis is the actual Minimax H3 Latent Upscaler (3D) from the separate upscaler repository. The AV latent is split explicitly, only the video stream is upscaled to 2 MP, and the original audio stream is recombined unchanged."
       ],
       "color": "#432",
       "bgcolor": "#653"
     },
     {
-      "id": 28,
+      "id": 30,
       "type": "MarkdownNote",
       "pos": [
         900,
-        1560
+        1620
       ],
       "size": [
-        300,
-        220
+        400,
+        260
       ],
       "flags": {},
-      "order": 28,
+      "order": 30,
       "mode": 0,
-      "title": "Don't substitute a generic scheduler",
+      "title": "From-source rebuild",
       "properties": {},
       "widgets_values": [
-        "### Pass 2 sigmas\n\n`0.9035, 0.6316, 0.3158, 0.0000` is NOT a generic partial-denoise fraction -- it's a hand-tuned tail for this specific LoRA + sigma shift. A BasicScheduler(steps, denoise<1) on the plain model here produces visibly worse output; confirmed directly."
+        "### Rebuild conditioning at the new canvas\n\nThe second Timeline Conditioning node receives the recombined upscaled AV latent. It reads the new canvas from that latent and re-encodes visual keyframes from their original Timeline Editor media. References and audio retain their native semantics."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 31,
+      "type": "MarkdownNote",
+      "pos": [
+        900,
+        1000
+      ],
+      "size": [
+        380,
+        200
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 0,
+      "title": "The other path",
+      "properties": {},
+      "widgets_values": [
+        "### Why there are two conditioning nodes\n\nUsing the sibling upscaler directly keeps the upscale operation transparent. The second conditioning pass is the native way to make keyframe latents match the new spatial token grid; it replaces the removed custom Timeline upscaler wrapper."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1135,7 +1298,7 @@
       7,
       8,
       0,
-      20,
+      23,
       0,
       "MODEL"
     ],
@@ -1173,6 +1336,38 @@
     ],
     [
       12,
+      2,
+      0,
+      21,
+      0,
+      "CLIP"
+    ],
+    [
+      13,
+      3,
+      0,
+      21,
+      1,
+      "VAE"
+    ],
+    [
+      14,
+      4,
+      0,
+      21,
+      4,
+      "VAE"
+    ],
+    [
+      15,
+      9,
+      0,
+      21,
+      2,
+      "MINIMAX_H3_TIMELINE"
+    ],
+    [
+      16,
       13,
       0,
       14,
@@ -1180,7 +1375,7 @@
       "SIGMAS"
     ],
     [
-      13,
+      17,
       10,
       0,
       15,
@@ -1188,7 +1383,7 @@
       "CONDITIONING"
     ],
     [
-      14,
+      18,
       11,
       0,
       16,
@@ -1196,7 +1391,7 @@
       "NOISE"
     ],
     [
-      15,
+      19,
       15,
       0,
       16,
@@ -1204,7 +1399,7 @@
       "GUIDER"
     ],
     [
-      16,
+      20,
       12,
       0,
       16,
@@ -1212,7 +1407,7 @@
       "SAMPLER"
     ],
     [
-      17,
+      21,
       14,
       0,
       16,
@@ -1220,7 +1415,7 @@
       "SIGMAS"
     ],
     [
-      18,
+      22,
       10,
       1,
       16,
@@ -1228,130 +1423,154 @@
       "LATENT"
     ],
     [
-      19,
-      10,
-      0,
-      18,
-      0,
-      "CONDITIONING"
-    ],
-    [
-      20,
+      23,
       16,
       1,
       18,
-      1,
+      0,
       "LATENT"
     ],
     [
-      21,
+      24,
       18,
       0,
-      20,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      22,
-      11,
+      19,
       0,
-      21,
-      0,
-      "NOISE"
-    ],
-    [
-      23,
-      20,
-      0,
-      21,
-      1,
-      "GUIDER"
-    ],
-    [
-      24,
-      12,
-      0,
-      21,
-      2,
-      "SAMPLER"
+      "LATENT"
     ],
     [
       25,
       19,
       0,
-      21,
-      3,
-      "SIGMAS"
+      20,
+      0,
+      "*"
     ],
     [
       26,
       18,
       1,
-      21,
-      4,
+      20,
+      1,
       "LATENT"
     ],
     [
       27,
+      20,
+      0,
       21,
-      0,
-      22,
-      0,
+      3,
       "LATENT"
     ],
     [
       28,
-      3,
-      0,
-      22,
-      1,
-      "VAE"
-    ],
-    [
-      29,
       21,
       0,
       23,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      29,
+      11,
       0,
-      "LATENT"
+      24,
+      0,
+      "NOISE"
     ],
     [
       30,
-      4,
-      0,
       23,
+      0,
+      24,
       1,
-      "VAE"
+      "GUIDER"
     ],
     [
       31,
-      22,
+      12,
       0,
       24,
-      0,
-      "IMAGE"
+      2,
+      "SAMPLER"
     ],
     [
       32,
-      23,
+      22,
       0,
       24,
-      1,
-      "AUDIO"
+      3,
+      "SIGMAS"
     ],
     [
       33,
-      10,
-      2,
+      21,
+      1,
       24,
-      2,
-      "FLOAT"
+      4,
+      "LATENT"
     ],
     [
       34,
       24,
       0,
       25,
+      0,
+      "LATENT"
+    ],
+    [
+      35,
+      3,
+      0,
+      25,
+      1,
+      "VAE"
+    ],
+    [
+      36,
+      24,
+      0,
+      26,
+      0,
+      "LATENT"
+    ],
+    [
+      37,
+      4,
+      0,
+      26,
+      1,
+      "VAE"
+    ],
+    [
+      38,
+      25,
+      0,
+      27,
+      0,
+      "IMAGE"
+    ],
+    [
+      39,
+      26,
+      0,
+      27,
+      1,
+      "AUDIO"
+    ],
+    [
+      40,
+      21,
+      2,
+      27,
+      2,
+      "FLOAT"
+    ],
+    [
+      41,
+      27,
+      0,
+      28,
       0,
       "VIDEO"
     ]
@@ -1377,7 +1596,7 @@
         450,
         20,
         400,
-        1000
+        700
       ],
       "color": "#a15a2f",
       "font_size": 24,
@@ -1385,12 +1604,12 @@
     },
     {
       "id": 3,
-      "title": "3. Timeline + conditioning",
+      "title": "3. Timeline + Conditioning A (pass 1)",
       "bounding": [
         880,
         20,
         420,
-        1000
+        1020
       ],
       "color": "#88A855",
       "font_size": 24,
@@ -1411,12 +1630,12 @@
     },
     {
       "id": 5,
-      "title": "5. Upscale + carry conditioning",
+      "title": "5. Plain upscale (latent only)",
       "bounding": [
         1340,
         1020,
         380,
-        550
+        1080
       ],
       "color": "#b58b2a",
       "font_size": 24,
@@ -1424,27 +1643,27 @@
     },
     {
       "id": 6,
-      "title": "6. Pass 2 - high res refine",
+      "title": "6. Conditioning B (pass 2, from source)",
       "bounding": [
         880,
         1020,
-        360,
-        550
+        420,
+        850
       ],
-      "color": "#a1309b",
+      "color": "#88A855",
       "font_size": 24,
       "flags": {}
     },
     {
       "id": 7,
-      "title": "7. Decode / save",
+      "title": "7. Pass 2 + decode / save",
       "bounding": [
         420,
         1020,
         380,
-        700
+        1230
       ],
-      "color": "#3f789e",
+      "color": "#a1309b",
       "font_size": 24,
       "flags": {}
     }
@@ -1452,7 +1671,7 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.4,
+      "scale": 0.38,
       "offset": [
         60,
         120
