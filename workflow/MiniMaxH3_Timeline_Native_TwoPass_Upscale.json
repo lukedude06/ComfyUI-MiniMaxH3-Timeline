@@ -1,5 +1,5 @@
 {
-  "id": "minimax-h3-timeline-2pass-upscale",
+  "id": "minimax-h3-timeline-native-2pass-upscale",
   "revision": 0,
   "last_node_id": 28,
   "last_link_id": 34,
@@ -219,46 +219,6 @@
       ]
     },
     {
-      "id": 7,
-      "type": "MiniMaxH3TimelineModelPatch",
-      "pos": [
-        470,
-        380
-      ],
-      "size": [
-        300,
-        144
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 3
-        }
-      ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            4
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "MiniMaxH3TimelineModelPatch"
-      },
-      "widgets_values": [
-        1.0,
-        64.0,
-        2.0
-      ]
-    },
-    {
       "id": 8,
       "type": "ModelAttentionBackend",
       "pos": [
@@ -276,7 +236,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 4
+          "link": 3
         }
       ],
       "outputs": [
@@ -330,7 +290,7 @@
         5.0,
         0.999,
         1.0,
-        "[{\"filename\": \"tl_keyframe.png\", \"type\": \"image\", \"role\": \"keyframe_start\", \"anchor_seconds\": -1, \"noise_aug\": 0.999}, {\"filename\": \"tl_reference.png\", \"type\": \"image\", \"role\": \"reference\", \"anchor_seconds\": -1, \"noise_aug\": 0.999}]"
+        "[{\"filename\": \"tl_keyframe.png\", \"type\": \"image\", \"role\": \"keyframe_start\", \"anchor_seconds\": -1}, {\"filename\": \"tl_reference.png\", \"type\": \"image\", \"role\": \"reference\", \"anchor_seconds\": -1}]"
       ]
     },
     {
@@ -1072,7 +1032,7 @@
       "title": "Why one model chain",
       "properties": {},
       "widgets_values": [
-        "### Shared model chain\n\nLoRA -> SigmaShift(12,3) -> Timeline Model Patch -> AttentionBackend, in that order -- feeds BOTH passes' guiders and the pass-1 scheduler. The 8-step schedule below is only correct for THIS LoRA; a different step-distilled checkpoint needs a different split boundary and refine sigmas."
+        "### Shared model chain\n\nLoRA -> SigmaShift(12,3) -> AttentionBackend, in that order -- feeds BOTH passes' guiders and the pass-1 scheduler. Timeline conditioning now uses ComfyUI's native MiniMax H3 payload and needs no model patch. The 8-step schedule below is only correct for THIS LoRA; a different step-distilled checkpoint needs a different split boundary and refine sigmas."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1142,14 +1102,6 @@
     [
       3,
       6,
-      0,
-      7,
-      0,
-      "MODEL"
-    ],
-    [
-      4,
-      7,
       0,
       8,
       0,

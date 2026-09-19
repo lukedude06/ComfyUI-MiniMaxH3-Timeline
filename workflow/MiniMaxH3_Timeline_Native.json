@@ -1,5 +1,5 @@
 {
-  "id": "7ef7b587-6b3e-4b6b-ae37-79f2453438ac",
+  "id": "minimax-h3-timeline-native",
   "revision": 0,
   "last_node_id": 29,
   "last_link_id": 46,
@@ -22,7 +22,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 34
+          "link": 33
         }
       ],
       "outputs": [
@@ -678,14 +678,14 @@
         8,
         0.999,
         1,
-        "[{\"filename\":\"2818527uhd_3840_2160_24fps_2_2s.mp4\",\"type\":\"video\",\"role\":\"keyframe_mid\",\"anchor_seconds\":6,\"noise_aug\":0.999},{\"filename\":\"13125042hd_1920_1080_30fps_4s.mp4\",\"type\":\"video\",\"role\":\"keyframe_start\",\"anchor_seconds\":-1,\"noise_aug\":0.999},{\"filename\":\"grand_project-wonders-of-the-earth-550792_4s.mp3\",\"type\":\"audio\",\"role\":\"keyframe_mid\",\"anchor_seconds\":4,\"noise_aug\":0.999}]",
+        "[{\"filename\":\"2818527uhd_3840_2160_24fps_2_2s.mp4\",\"type\":\"video\",\"role\":\"keyframe_mid\",\"anchor_seconds\":6},{\"filename\":\"13125042hd_1920_1080_30fps_4s.mp4\",\"type\":\"video\",\"role\":\"keyframe_start\",\"anchor_seconds\":-1},{\"filename\":\"grand_project-wonders-of-the-earth-550792_4s.mp3\",\"type\":\"audio\",\"role\":\"keyframe_mid\",\"anchor_seconds\":4}]",
         ""
       ],
       "widgets_values_named": {
         "duration_seconds": 8,
         "visual_cond_noise_aug": 0.999,
         "audio_cond_noise_aug": 1,
-        "media_json": "[{\"filename\":\"2818527uhd_3840_2160_24fps_2_2s.mp4\",\"type\":\"video\",\"role\":\"keyframe_mid\",\"anchor_seconds\":6,\"noise_aug\":0.999},{\"filename\":\"13125042hd_1920_1080_30fps_4s.mp4\",\"type\":\"video\",\"role\":\"keyframe_start\",\"anchor_seconds\":-1,\"noise_aug\":0.999},{\"filename\":\"grand_project-wonders-of-the-earth-550792_4s.mp3\",\"type\":\"audio\",\"role\":\"keyframe_mid\",\"anchor_seconds\":4,\"noise_aug\":0.999}]",
+        "media_json": "[{\"filename\":\"2818527uhd_3840_2160_24fps_2_2s.mp4\",\"type\":\"video\",\"role\":\"keyframe_mid\",\"anchor_seconds\":6},{\"filename\":\"13125042hd_1920_1080_30fps_4s.mp4\",\"type\":\"video\",\"role\":\"keyframe_start\",\"anchor_seconds\":-1},{\"filename\":\"grand_project-wonders-of-the-earth-550792_4s.mp3\",\"type\":\"audio\",\"role\":\"keyframe_mid\",\"anchor_seconds\":4}]",
         "minimax_h3_timeline_ui": ""
       }
     },
@@ -835,46 +835,6 @@
         "fps": 30,
         "bit_depth": 8
       }
-    },
-    {
-      "id": 29,
-      "type": "MiniMaxH3TimelineModelPatch",
-      "pos": [
-        -1161.5067381636482,
-        -1184.508049853526
-      ],
-      "size": [
-        340,
-        106
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 33
-        }
-      ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            34
-          ],
-          "slotIndex": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "MiniMaxH3TimelineModelPatch"
-      },
-      "widgets_values": [
-        1.0,
-        64.0,
-        2.0
-      ]
     }
   ],
   "links": [
@@ -977,14 +937,6 @@
     [
       33,
       20,
-      0,
-      29,
-      0,
-      "MODEL"
-    ],
-    [
-      34,
-      29,
       0,
       7,
       0,

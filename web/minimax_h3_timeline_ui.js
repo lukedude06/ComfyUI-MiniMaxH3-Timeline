@@ -105,12 +105,7 @@ function defaultItem() {
     // References had their own anchor_channel/anchor_closeness controls;
     // removed after testing showed they weren't needed for co-presence --
     // see nodes.py's module docstring.
-    // noise_aug: real per-item control (unlike the removed anchor system) --
-    // patches the DiT's own _cond_video_rows/_cond_audio_rows so each row's
-    // value is genuinely independent, not just a global scalar. Default
-    // matches the native per-modality default (visual 0.999, audio 1.0),
-    // resolved server-side from the item's actual media type if left unset.
-    return { filename: null, type: null, role: ROLE_REF, anchor_seconds: -1, noise_aug: 0.999 };
+    return { filename: null, type: null, role: ROLE_REF, anchor_seconds: -1 };
 }
 
 // --- Timeline Editor card UI -------------------------------------------
@@ -136,7 +131,10 @@ function installTimelineUI(node) {
     function syncFromWidget() {
         try {
             const parsed = JSON.parse(dataWidget.value || "[]");
-            items = Array.isArray(parsed) ? parsed.map((i) => ({ ...defaultItem(), ...i })) : [];
+            items = Array.isArray(parsed) ? parsed.map((i) => {
+                const { noise_aug: _legacyNoiseAug, ...clean } = { ...defaultItem(), ...i };
+                return clean;
+            }) : [];
         } catch {
             items = [];
         }
@@ -241,35 +239,6 @@ function installTimelineUI(node) {
             if (item.role === ROLE_MID) {
                 appendSecondsRow(card, item, "at:", "anchor_seconds", commit);
             }
-
-            // Real per-item control, unlike the removed anchor system --
-            // patches the DiT's own row-building so this item's value is
-            // genuinely independent of every other item's. 1.0 = this row's
-            // content is used exactly as given; lower values blend it toward
-            // noise before the model sees it, at the cost of matching it
-            // less exactly. Does NOT fix a hard cut into a mid-clip
-            // keyframe -- that's a duration_seconds problem, confirmed by
-            // direct testing after this was originally,
-            // wrongly, assumed to be the fix.
-            const augRow = document.createElement("div");
-            augRow.className = "h3c-seconds";
-            const augLabel = document.createElement("span");
-            augLabel.textContent = "noise_aug:";
-            const augInput = document.createElement("input");
-            augInput.type = "number";
-            augInput.step = "0.01";
-            augInput.min = "0";
-            augInput.max = "1";
-            augInput.value = item.noise_aug ?? 0.999;
-            augInput.onclick = (e) => e.stopPropagation();
-            augInput.onchange = () => {
-                const v = Math.max(0, Math.min(1, Number(augInput.value)));
-                item.noise_aug = Number.isNaN(v) ? 0.999 : v;
-                augInput.value = item.noise_aug;
-                commit();
-            };
-            augRow.append(augLabel, augInput);
-            card.appendChild(augRow);
 
             const tag = document.createElement("div");
             tag.className = "h3c-tag";
@@ -378,10 +347,9 @@ app.registerExtension({
 //
 // Reads the connected MiniMaxH3TimelineEditor node's media_json widget
 // directly and computes the exact same <Picture N>/<Video N>/<Audio N>
-// ordinals nodes.py's _combined_conditioning assigns (role ==
-// "reference" items, in array order, bucketed by media type, numbered
-// 1-based per bucket) -- so the tag you pick here is guaranteed to be the
-// tag the model actually receives, not a guess.
+// ordinals nodes.py's native compiler assigns. Every media card participates,
+// regardless of whether its role is Ref, Start, Mid, or End; role changes
+// DiT routing but never makes the card disappear from Qwen's presentation.
 
 const TYPE_LABELS = { image: "Picture", video: "Video", audio: "Audio" };
 
@@ -412,14 +380,14 @@ function getTimelineCandidates(integrationNode) {
     const counters = { image: 0, video: 0, audio: 0 };
     const items = [];
     raw.forEach((entry, index) => {
-        if (!entry || entry.role !== ROLE_REF || !entry.filename) return;
+        if (!entry || !entry.filename) return;
         const mediaType = ["image", "video", "audio"].includes(entry.type) ? entry.type : "image";
         counters[mediaType] = (counters[mediaType] || 0) + 1;
         const ordinal = counters[mediaType];
         const label = TYPE_LABELS[mediaType] || mediaType;
         items.push({
             tag: `<${label} ${ordinal}>`,
-            detail: String(entry.filename).split("/").pop(),
+            detail: `${ROLE_LABELS[entry.role] || entry.role || "Ref"} · ${String(entry.filename).split("/").pop()}`,
         });
     });
     return { connected: true, items };
