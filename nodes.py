@@ -648,14 +648,13 @@ def _latent_upscaler_module():
     return mod
 
 
-def _run_latent_upscaler(mod, z, model_name, mode, precision, force_unload):
+def _run_latent_upscaler(mod, z, model_name, mode, align, enable_temporal_chunking,
+                         force_unload, device, precision):
     """Run the sibling pack through its public 3D node implementation."""
-    device = comfy.model_management.get_torch_device()
-    device_name = "cuda" if device.type == "cuda" else "cpu"
     result = mod.MinimaxH3LatentUpscaler3D.execute(
-        latent={"samples": z}, model_name=model_name, mode=mode, align=32,
-        enable_temporal_chunking=True, force_unload=force_unload,
-        device=device_name, precision=precision,
+        latent={"samples": z}, model_name=model_name, mode=mode, align=align,
+        enable_temporal_chunking=enable_temporal_chunking,
+        force_unload=force_unload, device=device, precision=precision,
     )
     return result.result[0]["samples"]
 
@@ -684,8 +683,8 @@ class MiniMaxH3TimelineLatentUpscale:
     RETURN_TYPES = ("CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "latent")
     DESCRIPTION = ("Upscales a MiniMax H3 AV latent and brings its keyframe conditioning "
-                   "with it, as a matched pair. Drop it between the two samplers of a "
-                   "two-pass workflow -- no second Conditioning node, no Separate/Concat.")
+                   "with it, as a matched pair. Uses the sibling 3D upscaler's real "
+                   "multiplier, target-dimensions, or megapixel sizing behavior.")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -695,15 +694,29 @@ class MiniMaxH3TimelineLatentUpscale:
                 "positive": ("CONDITIONING",),
                 "latent": ("LATENT",),
                 "model_name": (models if models else ["(place a model in models/latent_upscale_models)"],),
+                "resize_mode": (["megapixels", "scale by multiplier", "target dimensions"], {
+                    "default": "megapixels",
+                    "tooltip": "Same sizing modes as the sibling Minimax H3 Latent Upscaler (3D)."}),
                 "scale": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.05,
-                                    "tooltip": "Spatial upscale factor. Time is unchanged."}),
-            },
-            "optional": {
+                                    "tooltip": "Used only in scale-by-multiplier mode."}),
+                "width": ("INT", {"default": 1920, "min": 64, "max": 8192, "step": 8,
+                                  "tooltip": "Pixel width used only in target-dimensions mode."}),
+                "height": ("INT", {"default": 1088, "min": 64, "max": 8192, "step": 8,
+                                   "tooltip": "Pixel height used only in target-dimensions mode."}),
+                "megapixels": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 16.0, "step": 0.1,
+                                           "tooltip": "Target MP used only in megapixels mode (1 MP = 1024x1024 pixels)."}),
+                "align": ("INT", {"default": 32, "min": 1, "max": 512, "step": 1}),
+                "enable_temporal_chunking": ("BOOLEAN", {"default": True}),
+                "force_unload": ("BOOLEAN", {"default": True}),
+                "device": (["cuda", "rocm", "cpu"], {"default": "cuda"}),
                 "precision": (["fp16", "bf16", "fp32"], {"default": "fp16"}),
             },
         }
 
-    def upscale(self, positive, latent, model_name, scale, precision="fp16"):
+    def upscale(self, positive, latent, model_name, resize_mode="megapixels", scale=2.0,
+                width=1920, height=1088, megapixels=2.0, align=32,
+                enable_temporal_chunking=True, force_unload=True,
+                device="cuda", precision="fp16"):
         mod = _latent_upscaler_module()
         if mod is None:
             raise ValueError(
@@ -717,11 +730,28 @@ class MiniMaxH3TimelineLatentUpscale:
 
         video, audio = _av_streams(latent)
         in_h, in_w = int(video.shape[3]), int(video.shape[4])
-        # Align in PIXEL space to CANVAS_MULTIPLE so the resulting latent is even
-        # on both axes -- the DiT patchifies 2x2, and _geometry_from_latent
-        # rejects an odd latent for the same reason.
-        px_w = max(h3.CANVAS_MULTIPLE, round(in_w * 16 * scale / h3.CANVAS_MULTIPLE) * h3.CANVAS_MULTIPLE)
-        px_h = max(h3.CANVAS_MULTIPLE, round(in_h * 16 * scale / h3.CANVAS_MULTIPLE) * h3.CANVAS_MULTIPLE)
+        if resize_mode == "scale by multiplier":
+            selected_mode = mod.UpscaleMode.SCALE_BY
+            raw_px_w, raw_px_h = in_w * 16 * scale, in_h * 16 * scale
+        elif resize_mode == "target dimensions":
+            selected_mode = mod.UpscaleMode.TARGET_DIMENSIONS
+            raw_px_w, raw_px_h = float(width), float(height)
+        elif resize_mode == "megapixels":
+            selected_mode = mod.UpscaleMode.MEGAPIXELS
+            target_pixels = float(megapixels) * 1024 * 1024
+            aspect = in_w / in_h
+            raw_px_h = math.sqrt(target_pixels / aspect)
+            raw_px_w = raw_px_h * aspect
+        else:
+            raise ValueError(f"Unsupported latent-upscale resize mode: {resize_mode}")
+
+        # Mirror the sibling node's pixel-space alignment exactly so we know
+        # the final canvas before deciding whether keyframes need a second pass.
+        alignment = max(1, int(align))
+        px_w = round(raw_px_w / alignment) * alignment
+        px_h = round(raw_px_h / alignment) * alignment
+        px_w = max(16, round(px_w / 16) * 16)
+        px_h = max(16, round(px_h / 16) * 16)
         out_w, out_h = px_w // 16, px_h // 16
         if (out_w, out_h) == (in_w, in_h):
             return (positive, latent)
@@ -735,12 +765,14 @@ class MiniMaxH3TimelineLatentUpscale:
             and (int(kf["latent"].shape[-2]), int(kf["latent"].shape[-1])) != (out_h, out_w)
         )
         mode = {
-            "mode": mod.UpscaleMode.SCALE_BY, "scale": float(scale),
-            "width": px_w, "height": px_h, "megapixels": 1.0,
+            "mode": selected_mode, "scale": float(scale),
+            "width": int(width), "height": int(height),
+            "megapixels": float(megapixels),
         }
         up_video = _run_latent_upscaler(
-            mod, video, model_name, mode, precision,
-            force_unload=(visual_keyframes == 0),
+            mod, video, model_name, mode, alignment, enable_temporal_chunking,
+            force_unload=(force_unload and visual_keyframes == 0),
+            device=device, precision=precision,
         )
         out_h, out_w = int(up_video.shape[-2]), int(up_video.shape[-1])
         out_latent = {"samples": comfy.nested_tensor.NestedTensor((up_video, audio))}
@@ -765,8 +797,10 @@ class MiniMaxH3TimelineLatentUpscale:
                             "height": out_h * 16, "megapixels": 1.0,
                         }
                         nkf["latent"] = _run_latent_upscaler(
-                            mod, z, model_name, keyframe_mode, precision,
-                            force_unload=(remaining_keyframes == 0),
+                            mod, z, model_name, keyframe_mode, alignment,
+                            enable_temporal_chunking,
+                            force_unload=(force_unload and remaining_keyframes == 0),
+                            device=device, precision=precision,
                         )
                         nkf["latent_t"] = int(nkf["latent"].shape[2])
                         n_kf += 1
